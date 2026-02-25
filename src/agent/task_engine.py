@@ -57,9 +57,11 @@ class TaskEngine:
                 self._fail_node(node.node_id, f"No action registered for {node.tool_action}")
                 raise RuntimeError(f"Unknown task action: {node.tool_action}")
 
-            node_retry_budget = self.retry_budget_per_stage
+            node_retry_budget = 0 if node.retry_rule is None else self.retry_budget_per_stage
             if node.retry_rule and node.retry_rule in retry_playbook:
-                node_retry_budget = int(retry_playbook[node.retry_rule].get("max_retries", node_retry_budget))
+                node_retry_budget = int(
+                    retry_playbook[node.retry_rule].get("max_retries", node_retry_budget)
+                )
 
             attempts = 0
             while True:

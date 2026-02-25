@@ -46,7 +46,7 @@ class PromptCompiler:
                 tool_action="run_baseline_autopilot",
                 inputs={"source": spec.source_paths[0] if spec.source_paths else "ref", "run_id": run_id},
                 outputs=[f"outputs/{run_id}/qa/hydraulic_qa.md"],
-                retry_rule="run-hecras",
+                retry_rule=None,
             ),
             TaskNode(
                 node_id="scenario_payload",

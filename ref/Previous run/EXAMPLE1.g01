@@ -1,0 +1,67 @@
+Geom Title=Example 1
+Program Version=6.70
+Viewing Rectangle=-970.97 , 10.96 , 286.46 ,-2.52 
+
+River Reach=River Example   ,1               
+Reach XY= 2 
+-960.20099252209277.5710808973491.320539419087140.35892116182573
+Rch Text X Y=0.1270747,0.7043568
+Reverse River Text= 0 
+
+Type RM Length L Ch R = 1 ,1000    ,600,600,600
+Node Last Edited Time=Feb/25/2026 10:59:32
+#Sta/Elev= 8 
+      -5      14      -5      12      -2      12       0       9       3       9
+       5      12       8      12       8      14
+#Mann= 3 ,0,0
+      -5     .02       0      -2     .01       0       5     .02       0
+Bank Sta=-2,5
+XS Rating Curve= 0 ,0
+XS HTab Starting El and Incr=10.15,0.24, 20 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
+Exp/Cntr=0.3,0.1
+
+Type RM Length L Ch R = 1 ,400     ,400,400,400
+Node Last Edited Time=Feb/25/2026 11:00:47
+#Sta/Elev= 8 
+      -5       8      -5       6      -2       6       0       3       3       3
+       5       6       8       6       8       8
+#Mann= 3 ,0,0
+      -5     .02       0      -2     .01       0       5     .02       0
+Bank Sta=-2,5
+XS Rating Curve= 0 ,0
+XS HTab Starting El and Incr=4.15,0.24, 20 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
+Exp/Cntr=0.3,0.1
+
+Type RM Length L Ch R = 1 ,0       ,0,0,0
+BEGIN DESCRIPTION:
+0m (Downstream)
+END DESCRIPTION:
+XS GIS Cut Line=5
+1.333697578833960.388207000606921.323328205962890.37161600401321
+1.320539419087140.358921161825731.317106582240250.34258175997422
+1.306737209369180.31769526508365
+Node Last Edited Time=Feb/25/2026 10:41:35
+#Sta/Elev= 8 
+      -5       6      -5       4      -2       4       0       1       3       1
+       5       4       8       4       8       6
+#Mann= 3 ,0,0
+      -5     .02       0      -2     .01       0       5     .02       0
+Bank Sta=-2,5
+XS Rating Curve= 0 ,0
+XS HTab Starting El and Incr=1.15,0.24, 20 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
+Exp/Cntr=0.3,0.1
+
+LCMann Time=Dec/30/1899 00:00:00
+LCMann Region Time=Dec/30/1899 00:00:00
+LCMann Table=0
+Chan Stop Cuts=-1 
+
+
+
+Use User Specified Reach Order=0
+GIS Ratio Cuts To Invert=-1
+GIS Limit At Bridges=0
+Composite Channel Slope=5
