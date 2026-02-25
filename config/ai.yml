@@ -3,7 +3,7 @@ ai:
   model: "gpt-4o-mini"
   api_key_env: "OPENAI_API_KEY"
   temperature: 0.1
-  max_tokens: 800
+  max_tokens: 1200
   prompts:
     anomaly_triage: >
       You are a hydraulic modeling QA assistant. Classify severity, likely root cause,
@@ -11,3 +11,18 @@ ai:
     report_reasoning: >
       Draft concise hydraulic interpretation text with explicit [VERIFY] and [CITE] markers
       when evidence is incomplete.
+    prompt_compiler:
+      extract_job_spec: >
+        Convert the user assignment prompt into a strict JSON job specification for hydraulic
+        automation. Preserve explicit numeric values and label uncertain fields with low confidence.
+      repair_job_spec: >
+        Repair the prior JSON so it validates against the required job schema and preserves all known constraints.
+    planner:
+      compile_plan: >
+        Convert the parsed job specification into a deterministic execution task graph with bounded retries.
+    repair:
+      stage_retry: >
+        Given a failed stage and logs, select one bounded retry action from the allowed playbook only.
+    report:
+      interpretation: >
+        Draft hydraulic interpretation text using quantified outputs and attach [CITE] markers for each claim.

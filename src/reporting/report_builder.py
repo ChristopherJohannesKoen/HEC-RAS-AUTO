@@ -4,6 +4,7 @@ from pathlib import Path
 
 from jinja2 import Template
 
+from src.reporting.citations import citations_markdown, inject_citation_markers, load_citations
 from src.reporting.figures import figure_list_markdown
 from src.reporting.narrative import build_qa_status, build_summary, scenario_notes
 from src.reporting.tables import load_input_summary, load_metrics_markdown
@@ -15,6 +16,8 @@ def build_report(
     output_root: Path = Path("outputs"),
 ) -> Path:
     template = Template(template_path.read_text(encoding="utf-8"))
+    citations = load_citations(run_id, output_root=output_root)
+    scenario_text = inject_citation_markers(scenario_notes(run_id), citations)
     rendered = template.render(
         run_id=run_id,
         summary=build_summary(run_id),
@@ -22,8 +25,9 @@ def build_report(
         qa_status=build_qa_status(run_id),
         metrics_table=load_metrics_markdown(run_id),
         figure_list=figure_list_markdown(run_id),
-        scenario_notes=scenario_notes(run_id),
+        scenario_notes=scenario_text,
         ai_notes=_load_ai_notes(run_id),
+        citations=citations_markdown(citations),
         assumptions=[
             "[VERIFY] Confirm bank station placements in HEC-RAS geometry editor.",
             "[VERIFY] Confirm selected flow regime (subcritical/supercritical/mixed).",

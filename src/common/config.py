@@ -7,8 +7,10 @@ import yaml
 
 from src.models import (
     AIConfig,
+    AgentSettings,
     AutomationConfig,
     ProjectConfig,
+    RetrievalSettings,
     SheetsConfig,
     ThresholdConfig,
 )
@@ -45,3 +47,11 @@ def load_automation_config(path: Path) -> AutomationConfig:
 
 def load_ai_config(path: Path) -> AIConfig:
     return AIConfig.model_validate(load_yaml(path))
+
+
+def load_agent_config(path: Path) -> AgentSettings:
+    return AgentSettings.model_validate(load_yaml(path))
+
+
+def load_retrieval_config(path: Path) -> RetrievalSettings:
+    return RetrievalSettings.model_validate(load_yaml(path))

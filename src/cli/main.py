@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 
 import typer
 
 from src.common.config import (
     load_ai_config,
+    load_agent_config,
     load_automation_config,
     load_project_config,
+    load_retrieval_config,
     load_sheets_config,
     load_threshold_config,
 )
@@ -17,6 +20,10 @@ from src.common.doctor import run_doctor_checks, summarize_doctor
 from src.common.logging import configure_logging
 from src.common.paths import ensure_repo_paths
 from src.agent.orchestrator import AutopilotOrchestrator, OpenAIAdvisor
+from src.agent.citation_scorer import filter_citations, score_citations
+from src.agent.prompt_compiler import PromptCompiler
+from src.agent.retrieval import WebCitationRetriever
+from src.agent.task_engine import TaskEngine
 from src.intake.excel_parser import parse_excel_inputs
 from src.intake.kmz_parser import parse_kmz_map, write_reference_points
 from src.intake.manifest_builder import build_manifest
@@ -45,8 +52,10 @@ from src.ras.result_locator import locate_run_results
 from src.ras.sdf_writer import write_rasimport_sdf
 from src.post.cad_export import export_floodline_dxf
 from src.reporting.report_builder import build_report
+from src.reporting.submission_pack import build_submission_pack
 from src.scenarios.scenario_compare import compare_runs
 from src.scenarios.scenario_loader import load_scenario
+from src.scenarios.scenario_registry import build_scenario_spec
 from src.xs.reach_lengths import assign_reach_lengths, write_reach_lengths
 from src.xs.roughness import apply_baseline_roughness
 from src.xs.xs_builder import build_cross_sections
@@ -519,6 +528,172 @@ def autopilot(
         raise
 
 
+@app.command("agent-plan")
+def agent_plan(
+    prompt: str = typer.Option(..., help="Free-text assignment prompt."),
+    source: str = typer.Option("ref"),
+    out: Path = typer.Option(Path("outputs/baseline/agent/compiled_plan.json")),
+    run_id: str = typer.Option("baseline"),
+    assigned_scenario: str = typer.Option("scenario_2"),
+    ai: Path = typer.Option(Path("config/ai.yml")),
+    agent_config: Path = typer.Option(Path("config/agent.yml")),
+) -> None:
+    """Compile free-text prompt into a strict execution plan."""
+    configure_logging()
+    ai_cfg = load_ai_config(ai).ai
+    ag_cfg = load_agent_config(agent_config).agent
+    compiler = PromptCompiler(ai_cfg, max_retries=ag_cfg.max_parse_retries)
+    spec = compiler.compile_job_spec(
+        prompt_text=prompt,
+        run_id=run_id,
+        source=source,
+        assigned_scenario_override=assigned_scenario,
+        strict=ag_cfg.strict_mode_default,
+    )
+    plan = compiler.compile_execution_plan(spec, run_id=run_id)
+    spec_path, plan_path = compiler.persist_plan_artifacts(run_id, spec, plan)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+    typer.echo(f"Prompt parse: {spec_path}")
+    typer.echo(f"Compiled plan: {plan_path}")
+    typer.echo(f"Explicit plan output: {out}")
+
+
+@app.command("agent-run")
+def agent_run(
+    prompt: str = typer.Option(..., help="Free-text assignment prompt."),
+    source: str = typer.Option("ref"),
+    run_id: str = typer.Option("baseline"),
+    assigned_scenario: str = typer.Option("scenario_2"),
+    strict: bool = typer.Option(True),
+    config: Path = typer.Option(Path("config/project.yml")),
+    sheets: Path = typer.Option(Path("config/sheets.yml")),
+    thresholds: Path = typer.Option(Path("config/thresholds.yml")),
+    automation: Path = typer.Option(Path("config/automation.yml")),
+    ai: Path = typer.Option(Path("config/ai.yml")),
+    agent_config: Path = typer.Option(Path("config/agent.yml")),
+    retrieval: Path = typer.Option(Path("config/retrieval.yml")),
+) -> None:
+    """Run prompt-to-project autonomous workflow and emit submission pack."""
+    configure_logging()
+    ai_cfg = load_ai_config(ai).ai
+    ag_cfg = load_agent_config(agent_config).agent
+    ret_cfg = load_retrieval_config(retrieval).retrieval
+    compiler = PromptCompiler(ai_cfg, max_retries=ag_cfg.max_parse_retries)
+
+    spec = compiler.compile_job_spec(
+        prompt_text=prompt,
+        run_id=run_id,
+        source=source,
+        assigned_scenario_override=assigned_scenario,
+        strict=strict,
+    )
+    plan = compiler.compile_execution_plan(spec, run_id=run_id)
+    compiler.persist_plan_artifacts(run_id, spec, plan)
+
+    engine = TaskEngine(
+        run_id=run_id,
+        retry_budget_per_stage=ag_cfg.retry_budget_per_stage,
+        enable_self_heal=ag_cfg.enable_self_heal,
+    )
+    action_registry = _build_agent_action_registry(
+        prompt_spec=spec,
+        source=source,
+        run_id=run_id,
+        strict=strict,
+        config=config,
+        sheets=sheets,
+        thresholds=thresholds,
+        automation=automation,
+        ai_cfg=ai_cfg,
+        retrieval_cfg=ret_cfg,
+    )
+
+    try:
+        state = engine.execute(
+            plan=plan,
+            action_registry=action_registry,
+            retry_playbook=plan.retry_playbook,
+            resume=False,
+        )
+        explain_path = _write_agent_explain(run_id)
+        typer.echo(f"Agent run completed. State: outputs/{run_id}/agent/task_state.json")
+        typer.echo(f"Explain report: {explain_path}")
+        typer.echo(f"Submission manifest: outputs/{run_id}/submission/manifest.json")
+        _ = state
+    except Exception as exc:
+        fail_path = _write_agent_fail_report(run_id, exc)
+        raise RuntimeError(f"agent-run failed. See {fail_path}") from exc
+
+
+@app.command("agent-resume")
+def agent_resume(
+    run_id: str = typer.Option(..., help="Run id to resume."),
+    source: str = typer.Option("ref"),
+    strict: bool = typer.Option(True),
+    config: Path = typer.Option(Path("config/project.yml")),
+    sheets: Path = typer.Option(Path("config/sheets.yml")),
+    thresholds: Path = typer.Option(Path("config/thresholds.yml")),
+    automation: Path = typer.Option(Path("config/automation.yml")),
+    ai: Path = typer.Option(Path("config/ai.yml")),
+    agent_config: Path = typer.Option(Path("config/agent.yml")),
+    retrieval: Path = typer.Option(Path("config/retrieval.yml")),
+) -> None:
+    """Resume a previously compiled agent plan from task state."""
+    configure_logging()
+    plan_path = Path("outputs") / run_id / "agent" / "compiled_plan.json"
+    spec_path = Path("outputs") / run_id / "agent" / "prompt_parse.json"
+    if not plan_path.exists() or not spec_path.exists():
+        raise FileNotFoundError(
+            f"Missing compiled plan or prompt parse under outputs/{run_id}/agent."
+        )
+    from src.models import ExecutionPlan, PromptJobSpec
+
+    plan = ExecutionPlan.model_validate_json(plan_path.read_text(encoding="utf-8"))
+    spec = PromptJobSpec.model_validate_json(spec_path.read_text(encoding="utf-8"))
+
+    ai_cfg = load_ai_config(ai).ai
+    ag_cfg = load_agent_config(agent_config).agent
+    ret_cfg = load_retrieval_config(retrieval).retrieval
+    engine = TaskEngine(
+        run_id=run_id,
+        retry_budget_per_stage=ag_cfg.retry_budget_per_stage,
+        enable_self_heal=ag_cfg.enable_self_heal,
+    )
+    action_registry = _build_agent_action_registry(
+        prompt_spec=spec,
+        source=source,
+        run_id=run_id,
+        strict=strict,
+        config=config,
+        sheets=sheets,
+        thresholds=thresholds,
+        automation=automation,
+        ai_cfg=ai_cfg,
+        retrieval_cfg=ret_cfg,
+    )
+    try:
+        engine.execute(
+            plan=plan,
+            action_registry=action_registry,
+            retry_playbook=plan.retry_playbook,
+            resume=True,
+        )
+        explain_path = _write_agent_explain(run_id)
+        typer.echo(f"Agent resume completed: {explain_path}")
+    except Exception as exc:
+        fail_path = _write_agent_fail_report(run_id, exc)
+        raise RuntimeError(f"agent-resume failed. See {fail_path}") from exc
+
+
+@app.command("agent-explain")
+def agent_explain(run_id: str = typer.Option(..., help="Run id to explain.")) -> None:
+    """Render human-readable decision trace from task and decision logs."""
+    configure_logging()
+    out = _write_agent_explain(run_id)
+    typer.echo(f"Agent explanation: {out}")
+
+
 @app.command()
 def pipeline(
     run_id: str = typer.Argument("baseline"),
@@ -706,6 +881,157 @@ def _write_sweep_envelope(base_run: str, scenario_runs: list[str]) -> Path:
     df.to_csv(detail_path, index=False)
     envelope.to_csv(env_path, index=False)
     return env_path
+
+
+def _build_agent_action_registry(
+    prompt_spec,
+    source: str,
+    run_id: str,
+    strict: bool,
+    config: Path,
+    sheets: Path,
+    thresholds: Path,
+    automation: Path,
+    ai_cfg,
+    retrieval_cfg,
+):
+    def run_baseline_autopilot(_inputs: dict) -> dict:
+        autopilot(
+            source=source,
+            run_id=run_id,
+            scenario2=False,
+            sweep="",
+            strict=strict,
+            config=config,
+            sheets=sheets,
+            thresholds=thresholds,
+            automation=automation,
+            ai=Path("config/ai.yml"),
+        )
+        return {"baseline_run": run_id}
+
+    def prepare_assigned_scenario_payload(inputs: dict) -> dict:
+        scenario_id = str(inputs["scenario_id"])
+        climate_mult = 1.15
+        if scenario_id == "scenario_2":
+            climate_mult = float(
+                prompt_spec.constraints.get(
+                    "scenario_2_multiplier",
+                    load_automation_config(automation).autopilot.scenario2.fixed_multiplier,
+                )
+            )
+        spec = build_scenario_spec(scenario_id, climate_multiplier=climate_mult)
+        cfg = load_project_config(config)
+        flow_json, flow_csv = write_steady_flow_payload(cfg.hydraulics, run_id=scenario_id, scenario=spec)
+        return {"scenario_flow_json": str(flow_json), "scenario_flow_csv": str(flow_csv)}
+
+    def execute_assigned_scenario(inputs: dict) -> dict:
+        scenario_id = str(inputs["scenario_id"])
+        prepare_run(run_id=scenario_id, config=config)
+        run_hecras(run_id=scenario_id, config=config, strict=strict, auto_close_instances=True)
+        import_results(run_id=scenario_id)
+        analyze(run_id=scenario_id, config=config, thresholds=thresholds)
+        _enforce_real_hydraulics(run_id=scenario_id, strict=strict)
+        build_report_cmd(run_id=scenario_id)
+        return {"scenario_run": scenario_id}
+
+    def compare_baseline_scenario(inputs: dict) -> dict:
+        scenario_id = str(inputs["scenario_id"])
+        table, profile = compare_runs(run_id, scenario_id)
+        return {"comparison_table": str(table), "comparison_profile": str(profile)}
+
+    def collect_citations(inputs: dict) -> dict:
+        scenario_id = str(inputs["scenario_id"])
+        objective = str(inputs.get("objective", "Hydraulic interpretation for scenario analysis."))
+        retriever = WebCitationRetriever(ai_cfg, retrieval_cfg)
+        claims = [
+            objective,
+            f"Hydraulic mechanism interpretation for {scenario_id} in 1D steady HEC-RAS.",
+            f"Design flood change assumptions for {scenario_id}.",
+        ]
+        citations = retriever.retrieve(claims)
+        citations = score_citations(citations, retrieval_cfg)
+        citations = filter_citations(citations, retrieval_cfg.citation_confidence_threshold)
+        agent_dir = Path("outputs") / run_id / "agent"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        path = agent_dir / "citations.json"
+        path.write_text(
+            json.dumps([c.model_dump(mode="json") for c in citations], indent=2),
+            encoding="utf-8",
+        )
+        # Rebuild reports to inject citation markers.
+        build_report_cmd(run_id=run_id)
+        build_report_cmd(run_id=scenario_id)
+        return {"citations_path": str(path), "count": len(citations)}
+
+    def build_submission(inputs: dict) -> dict:
+        scenario_id = str(inputs["scenario_id"])
+        build_report_cmd(run_id=run_id)
+        build_report_cmd(run_id=scenario_id)
+        manifest = build_submission_pack(base_run_id=run_id, scenario_run_id=scenario_id)
+        return {"submission_manifest": str(manifest)}
+
+    return {
+        "run_baseline_autopilot": run_baseline_autopilot,
+        "prepare_assigned_scenario_payload": prepare_assigned_scenario_payload,
+        "execute_assigned_scenario": execute_assigned_scenario,
+        "compare_baseline_scenario": compare_baseline_scenario,
+        "collect_citations": collect_citations,
+        "build_submission_pack": build_submission,
+    }
+
+
+def _write_agent_fail_report(run_id: str, exc: Exception) -> Path:
+    out = Path("outputs") / run_id / "agent" / "fail_report.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "run_id": run_id,
+        "status": "failed",
+        "error": str(exc),
+        "remediation": [
+            "Review outputs/<run_id>/agent/task_state.json for failed node.",
+            "Review outputs/<run_id>/autopilot/fail_report.json if baseline autopilot failed.",
+            "Run ras-auto agent-resume --run-id <run_id> after remediation.",
+        ],
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return out
+
+
+def _write_agent_explain(run_id: str) -> Path:
+    agent_dir = Path("outputs") / run_id / "agent"
+    explain_path = agent_dir / "explain.md"
+    state_path = agent_dir / "task_state.json"
+    decisions_path = agent_dir / "decisions.jsonl"
+    plan_path = agent_dir / "compiled_plan.json"
+
+    lines = [f"# Agent Explain: {run_id}", ""]
+    if plan_path.exists():
+        lines.append(f"- Plan: `{plan_path}`")
+    if state_path.exists():
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        lines.append(f"- Status: `{state.get('status', 'unknown')}`")
+        lines.append("")
+        lines.append("## Task State")
+        for node_id, node in state.get("nodes", {}).items():
+            lines.append(
+                f"- `{node_id}`: {node.get('status')} (attempt={node.get('attempt', 0)})"
+            )
+    if decisions_path.exists():
+        lines.append("")
+        lines.append("## Decision Trace")
+        for line in decisions_path.read_text(encoding="utf-8").splitlines()[-20:]:
+            try:
+                obj = json.loads(line)
+                lines.append(
+                    f"- `{obj.get('stage')}` `{obj.get('decision_type')}`: {obj.get('rationale')}"
+                )
+            except Exception:
+                continue
+    explain_path.parent.mkdir(parents=True, exist_ok=True)
+    explain_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return explain_path
 
 
 if __name__ == "__main__":

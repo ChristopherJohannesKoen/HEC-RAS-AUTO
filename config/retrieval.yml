@@ -1,0 +1,18 @@
+retrieval:
+  allowed_domains:
+    - "noaa.gov"
+    - "wmo.int"
+    - "ipcc.ch"
+    - "sciencedirect.com"
+    - "springer.com"
+    - "mdpi.com"
+    - "jstor.org"
+    - "saweather.co.za"
+    - "dws.gov.za"
+  blocked_domains:
+    - "tiktok.com"
+    - "instagram.com"
+    - "facebook.com"
+  max_sources_per_claim: 2
+  recency_days: 3650
+  citation_confidence_threshold: 0.6

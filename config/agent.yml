@@ -1,0 +1,9 @@
+agent:
+  parser_model: "gpt-4o-mini"
+  planner_model: "gpt-4o-mini"
+  max_parse_retries: 2
+  enable_self_heal: true
+  retry_budget_per_stage: 1
+  strict_mode_default: true
+  assigned_scenario_required: true
+  automation_policy_file: "config/automation.yml"

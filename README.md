@@ -60,6 +60,23 @@ Optional Scenario 2 sensitivity sweep:
 ras-auto autopilot --source ref --run-id baseline --scenario2 --sweep 1.10,1.15,1.20
 ```
 
+## Prompt-Driven Agent v3
+Compile plan only:
+```powershell
+ras-auto agent-plan --prompt "Build baseline and scenario analysis from the provided Meerlustkloof files" --source ref --run-id baseline
+```
+
+Run end-to-end prompt workflow:
+```powershell
+ras-auto agent-run --prompt "Given the assignment brief, complete baseline + Scenario 2 with citations and submission pack" --source ref --run-id baseline --assigned-scenario scenario_2 --strict
+```
+
+Resume and explain:
+```powershell
+ras-auto agent-resume --run-id baseline
+ras-auto agent-explain --run-id baseline
+```
+
 ## Notes
 - Real project files can be added later under `data/raw/`.
 - Fixtures are used to develop the pipeline contract before full data arrives.

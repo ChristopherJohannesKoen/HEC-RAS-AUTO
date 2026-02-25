@@ -24,9 +24,24 @@ def build_qa_status(run_id: str, outputs_root: Path = Path("outputs")) -> str:
 
 
 def scenario_notes(run_id: str) -> str:
-    if run_id == "scenario_2":
+    if run_id.startswith("scenario_2"):
         return (
             "Scenario 2 applies explicit multipliers to upstream and tributary 1:100-year flows.\n"
             "[VERIFY] Confirm multiplier values against selected climate projection source."
+        )
+    if run_id.startswith("scenario_1"):
+        return (
+            "Scenario 1 represents right-bank floodplain settlement effects with changed conveyance/storage.\n"
+            "[VERIFY][CITE] Confirm roughness and effective-flow assumptions."
+        )
+    if run_id.startswith("scenario_3"):
+        return (
+            "Scenario 3 represents confluence-area development and platform leveling impacts.\n"
+            "[VERIFY][CITE] Confirm parameter choices for confluence hydraulics."
+        )
+    if run_id.startswith("scenario_4"):
+        return (
+            "Scenario 4 represents floodplain rehabilitation and increased riparian retardance.\n"
+            "[VERIFY][CITE] Confirm literature-supported roughness adjustments."
         )
     return "Baseline case. No scenario flow multipliers applied."
