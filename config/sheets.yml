@@ -1,0 +1,10 @@
+excel:
+  cross_sections_sheet: "CrossSections"
+  centerline_sheet: "Centreline"
+  columns:
+    chainage: "Chainage_m"
+    station: "Station_m"
+    offset: "Offset_m"
+    elevation: "Elevation_m"
+    x: "X"
+    y: "Y"

@@ -1,0 +1,6 @@
+scenario_id: "baseline"
+title: "Baseline"
+flow_multiplier_upstream: 1.0
+flow_multiplier_tributary: 1.0
+rationale: "No modifications relative to assignment baseline."
+references: []

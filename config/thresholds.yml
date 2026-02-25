@@ -1,0 +1,17 @@
+terrain:
+  xs_profile_sample_spacing_m: 2.0
+  xs_gap_expected_length_m: 90.0
+  xs_gap_length_tolerance_m: 20.0
+  max_profile_jump_per_step_m: 3.0
+  max_nodata_fraction: 0.2
+
+qa:
+  min_cross_sections: 8
+  max_section_crossing_count: 1
+  max_velocity_reasonableness_mps: 10.0
+  max_eg_jump_between_sections_m: 5.0
+  min_bankfull_width_m: 2.0
+  max_bank_shift_between_sections_m: 50.0
+
+plotting:
+  longitudinal_chainage_tick_m: 500

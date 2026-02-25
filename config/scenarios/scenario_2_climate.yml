@@ -1,0 +1,7 @@
+scenario_id: "scenario_2"
+title: "Climate Intensification"
+flow_multiplier_upstream: 1.15
+flow_multiplier_tributary: 1.15
+rationale: "Rare-event flow intensification under projected climate signal."
+references:
+  - "[VERIFY] Add local Western Cape climate projection source."

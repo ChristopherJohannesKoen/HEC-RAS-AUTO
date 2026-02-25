@@ -1,0 +1,24 @@
+# {{ run_id | upper }} Report Draft
+
+## Summary
+{{ summary }}
+
+## Inputs
+{{ input_summary }}
+
+## QA Status
+{{ qa_status }}
+
+## Key Metrics
+{{ metrics_table }}
+
+## Figures
+{{ figure_list }}
+
+## Scenario Notes
+{{ scenario_notes }}
+
+## Assumptions and Verification Markers
+{% for item in assumptions %}
+- {{ item }}
+{% endfor %}
