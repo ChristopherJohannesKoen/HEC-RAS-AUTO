@@ -1,0 +1,2 @@
+[console_scripts]
+ras-auto = src.cli.main:app

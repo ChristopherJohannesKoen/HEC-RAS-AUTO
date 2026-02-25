@@ -2,7 +2,7 @@ project:
   name: "Meerlustkloof"
   river_name: "Meerlustkloof"
   reach_name: "Main"
-  target_crs_epsg: 32734
+  target_crs_epsg: 4148
   units: "SI"
 
 files:

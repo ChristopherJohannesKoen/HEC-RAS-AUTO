@@ -12,7 +12,7 @@ def load_metrics_markdown(run_id: str, outputs_root: Path = Path("outputs")) -> 
     df = pd.read_csv(metrics_csv)
     if df.empty:
         return "_Metrics file is empty._"
-    return df.to_markdown(index=False)
+    return _df_to_markdown_safe(df)
 
 
 def load_input_summary(run_id: str, runs_root: Path = Path("runs")) -> str:
@@ -22,4 +22,17 @@ def load_input_summary(run_id: str, runs_root: Path = Path("runs")) -> str:
     df = pd.read_csv(flow_csv)
     if df.empty:
         return "_Steady-flow table empty._"
-    return df.to_markdown(index=False)
+    return _df_to_markdown_safe(df)
+
+
+def _df_to_markdown_safe(df: pd.DataFrame) -> str:
+    try:
+        return df.to_markdown(index=False)
+    except Exception:
+        # Fallback when optional dependency `tabulate` is not available.
+        cols = [str(c) for c in df.columns]
+        lines = ["| " + " | ".join(cols) + " |", "| " + " | ".join(["---"] * len(cols)) + " |"]
+        for _, row in df.iterrows():
+            vals = [str(row[c]) for c in df.columns]
+            lines.append("| " + " | ".join(vals) + " |")
+        return "\n".join(lines)

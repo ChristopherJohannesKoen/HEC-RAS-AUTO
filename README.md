@@ -1,14 +1,15 @@
 # HEC-RAS-AUTO
 
-Deterministic, fixture-first automation pipeline for a supervised HEC-RAS 6.6 workflow.
+Deterministic, fixture-first automation pipeline for HEC-RAS baseline + Scenario 2 workflows.
 
-## What This v1 Implements
+## What This Implements
 - Intake validation for KMZ/XLSX/SHP/PRJ/GeoTIFF.
 - Chainage 0 cross-section completion from terrain sampling.
 - Geometry packaging and `RASImport.sdf` generation.
 - Baseline + Scenario 2 (climate intensification) run preparation.
-- Post-run discovery, analytics, QA reports, and draft Markdown report.
-- Manual compute gate inside HEC-RAS UI.
+- COM-driven unattended HEC-RAS compute (`RAS67`/`RAS66` auto-detect).
+- Post-run discovery, analytics, QA reports, CAD DXF export, and draft Markdown report.
+- Guardrailed `autopilot` mode with OpenAI-assisted anomaly triage (optional).
 
 ## Quick Start
 ```powershell
@@ -22,7 +23,7 @@ ras-auto build-geometry --run-id baseline
 ras-auto prepare-run --run-id baseline
 ```
 
-Then perform the manual HEC-RAS compute gate using instructions in:
+Then perform the manual HEC-RAS compute gate (optional path) using instructions in:
 `runs/baseline/ras_project/MANUAL_COMPUTE_STEPS.txt`
 
 Resume:
@@ -42,7 +43,24 @@ ras-auto build-report --run-id baseline
 ras-auto build-report --run-id scenario_2
 ```
 
+## Unattended v2 Mode
+```powershell
+setx OPENAI_API_KEY "<your_key>"   # optional, for AI triage text
+ras-auto doctor --config config/project.yml
+ras-auto autopilot --source ref --run-id baseline --scenario2
+```
+
+Additional automation command:
+```powershell
+ras-auto run-hecras --run-id baseline --strict
+```
+
+Optional Scenario 2 sensitivity sweep:
+```powershell
+ras-auto autopilot --source ref --run-id baseline --scenario2 --sweep 1.10,1.15,1.20
+```
+
 ## Notes
 - Real project files can be added later under `data/raw/`.
 - Fixtures are used to develop the pipeline contract before full data arrives.
-- CAD UI automation is out of scope in v1 by design.
+- CAD UI automation is not required; DXF + GIS exports are generated automatically.

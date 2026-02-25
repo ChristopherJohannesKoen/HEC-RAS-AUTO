@@ -5,7 +5,13 @@ from typing import Any
 
 import yaml
 
-from src.models import ProjectConfig, SheetsConfig, ThresholdConfig
+from src.models import (
+    AIConfig,
+    AutomationConfig,
+    ProjectConfig,
+    SheetsConfig,
+    ThresholdConfig,
+)
 from src.models.scenario import ScenarioSpec
 
 
@@ -31,3 +37,11 @@ def load_sheets_config(path: Path) -> SheetsConfig:
 
 def load_scenario_spec(path: Path) -> ScenarioSpec:
     return ScenarioSpec.model_validate(load_yaml(path))
+
+
+def load_automation_config(path: Path) -> AutomationConfig:
+    return AutomationConfig.model_validate(load_yaml(path))
+
+
+def load_ai_config(path: Path) -> AIConfig:
+    return AIConfig.model_validate(load_yaml(path))

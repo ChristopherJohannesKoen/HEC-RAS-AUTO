@@ -4,8 +4,14 @@ from pathlib import Path
 
 
 def build_summary(run_id: str) -> str:
+    autopilot_state = Path("outputs") / run_id / "autopilot" / "state.json"
+    if autopilot_state.exists():
+        return (
+            f"Run `{run_id}` was processed in unattended autopilot mode with COM-driven HEC-RAS compute. "
+            "Outputs were auto-generated for QA, metrics, plots, CAD export, and reporting."
+        )
     return (
-        f"Run `{run_id}` was processed through the supervised HEC-RAS pipeline with a manual compute gate. "
+        f"Run `{run_id}` was processed through the supervised HEC-RAS pipeline. "
         "Outputs were auto-generated for QA, metrics, plots, and reporting."
     )
 

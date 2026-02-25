@@ -9,11 +9,26 @@ from src.geo.geometry_ops import section_intersects_reach_once, sections_cross
 from src.models import QAIssue
 
 
-def run_geometry_qa(sections_json: Path, centerline_geojson: Path) -> list[QAIssue]:
+def run_geometry_qa(
+    sections_json: Path,
+    centerline_geojson: Path,
+    min_sections: int = 2,
+) -> list[QAIssue]:
     issues: list[QAIssue] = []
     sections = json.loads(sections_json.read_text(encoding="utf-8"))
     if not sections:
         return [QAIssue(severity="error", code="NO_SECTIONS", message="No cross-sections generated.")]
+
+    if len(sections) < min_sections:
+        issues.append(
+            QAIssue(
+                severity="error",
+                code="SECTION_COUNT_LOW",
+                message=(
+                    f"Only {len(sections)} cross-sections generated; expected at least {min_sections}."
+                ),
+            )
+        )
 
     chainages = [float(s["chainage_m"]) for s in sections]
     if chainages != sorted(chainages):

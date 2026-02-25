@@ -1,0 +1,13 @@
+ai:
+  provider: "openai"
+  model: "gpt-4o-mini"
+  api_key_env: "OPENAI_API_KEY"
+  temperature: 0.1
+  max_tokens: 800
+  prompts:
+    anomaly_triage: >
+      You are a hydraulic modeling QA assistant. Classify severity, likely root cause,
+      and bounded next action from the supplied logs and QA findings.
+    report_reasoning: >
+      Draft concise hydraulic interpretation text with explicit [VERIFY] and [CITE] markers
+      when evidence is incomplete.

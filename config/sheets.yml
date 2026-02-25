@@ -1,6 +1,6 @@
 excel:
-  cross_sections_sheet: "CrossSections"
-  centerline_sheet: "Centreline"
+  cross_sections_sheet: "Cross Sections"
+  centerline_sheet: "Long Section"
   columns:
     chainage: "Chainage_m"
     station: "Station_m"

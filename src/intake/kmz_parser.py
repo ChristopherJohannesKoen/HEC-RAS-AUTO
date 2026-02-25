@@ -60,7 +60,15 @@ def write_reference_points(points: list[ReferencePoint], out_dir: Path = Path("d
         geometry=[Point(p.x, p.y) for p in points],
         crs=f"EPSG:{points[0].crs_epsg}",
     )
-    gdf.to_file(geojson_path, driver="GeoJSON")
+    try:
+        if geojson_path.exists():
+            geojson_path.unlink()
+        gdf.to_file(geojson_path, driver="GeoJSON", engine="fiona")
+    except PermissionError:
+        logger.warning(
+            "Could not overwrite %s due to file lock; keeping existing GeoJSON and continuing.",
+            geojson_path,
+        )
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["name", "source_file", "lon", "lat", "x", "y", "crs_epsg"])

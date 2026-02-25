@@ -1,0 +1,16 @@
+autopilot:
+  mode: "guardrailed"
+  strict_geometry: true
+  strict_hydraulics: true
+  max_retries: 1
+  allow_fallback_xs_fill: true
+  scenario2:
+    enabled: true
+    fixed_multiplier: 1.15
+    sweep_enabled: false
+    sweep_values: [1.1, 1.15, 1.2]
+  stop_on:
+    - "geometry_qa_error"
+    - "hecras_compute_failure"
+    - "missing_plan_hdf"
+    - "hydraulic_qa_error"

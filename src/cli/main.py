@@ -7,18 +7,22 @@ from pathlib import Path
 import typer
 
 from src.common.config import (
+    load_ai_config,
+    load_automation_config,
     load_project_config,
-    load_scenario_spec,
     load_sheets_config,
     load_threshold_config,
 )
+from src.common.doctor import run_doctor_checks, summarize_doctor
 from src.common.logging import configure_logging
 from src.common.paths import ensure_repo_paths
+from src.agent.orchestrator import AutopilotOrchestrator, OpenAIAdvisor
 from src.intake.excel_parser import parse_excel_inputs
 from src.intake.kmz_parser import parse_kmz_map, write_reference_points
 from src.intake.manifest_builder import build_manifest
 from src.intake.prj_parser import validate_target_crs
 from src.intake.shapefile_parser import parse_centerline_shapefile
+from src.intake.source_sync import stage_inputs_from_source
 from src.post.extract_sections import extract_required_sections
 from src.post.floodline_mapper import export_energy_floodline
 from src.post.long_profile import build_longitudinal_profile
@@ -27,12 +31,19 @@ from src.qa.geometry_qa import run_geometry_qa
 from src.qa.hydraulic_qa import run_hydraulic_qa
 from src.qa.regime_recommender import write_regime_recommendation
 from src.ras.flow_writer import write_steady_flow_payload
-from src.ras.hdf_reader import discover_hdf_paths, extract_numeric_datasets
+from src.ras.hdf_reader import (
+    discover_hdf_paths,
+    extract_hydraulic_signals,
+    extract_numeric_datasets,
+    extract_profile_values,
+)
 from src.ras.manual_steps import write_manual_compute_steps
 from src.ras.ras_log_parser import parse_ras_log
+from src.ras.controller_adapter import HECControllerError, HECRASControllerAdapter
 from src.ras.ras_shell import clone_shell_project, stage_import_file
 from src.ras.result_locator import locate_run_results
 from src.ras.sdf_writer import write_rasimport_sdf
+from src.post.cad_export import export_floodline_dxf
 from src.reporting.report_builder import build_report
 from src.scenarios.scenario_compare import compare_runs
 from src.scenarios.scenario_loader import load_scenario
@@ -106,13 +117,13 @@ def complete_xs(
 def build_geometry(
     run_id: str = typer.Option("baseline"),
     config: Path = typer.Option(Path("config/project.yml")),
+    thresholds: Path = typer.Option(Path("config/thresholds.yml")),
 ) -> None:
     """Build cross-section package, assign roughness/reach lengths, and run geometry QA."""
     configure_logging()
     cfg = load_project_config(config)
-    xs_source = Path("data/processed/xs_chainage_0_completed.csv")
-    if not xs_source.exists():
-        xs_source = Path("data/processed/cross_sections_raw.csv")
+    th = load_threshold_config(thresholds)
+    xs_source = _prepare_xs_geometry_input()
 
     sections_json = build_cross_sections(
         centerline_geojson=Path("data/processed/centerline_from_shp.geojson"),
@@ -134,11 +145,17 @@ def build_geometry(
     _write_sections_json(sections, sections_json)
     write_reach_lengths(sections)
 
-    qa_issues = run_geometry_qa(sections_json, Path("data/processed/centerline_from_shp.geojson"))
+    qa_issues = run_geometry_qa(
+        sections_json,
+        Path("data/processed/centerline_from_shp.geojson"),
+        min_sections=th.qa.min_cross_sections,
+    )
     qa_dir = Path("outputs") / run_id / "qa"
     qa_dir.mkdir(parents=True, exist_ok=True)
     qa_path = qa_dir / "geometry_qa.md"
     qa_path.write_text(_issues_to_markdown("Geometry QA", qa_issues), encoding="utf-8")
+    if any(issue.severity == "error" for issue in qa_issues):
+        raise RuntimeError(f"Geometry QA failed. Inspect report: {qa_path}")
     typer.echo(f"Geometry build complete. QA report: {qa_path}")
 
 
@@ -185,8 +202,16 @@ def import_results(run_id: str = typer.Option("baseline")) -> None:
     hdf_keys_path = out_dir / "hdf_keys.json"
     hdf_keys_path.write_text(json.dumps(discover_hdf_paths(hdf_path), indent=2), encoding="utf-8")
     summary_csv = extract_numeric_datasets(hdf_path, out_dir / "hdf_numeric_summary.csv")
+    signals_csv = extract_hydraulic_signals(hdf_path, out_dir / "hdf_hydraulic_signals.csv")
+    profile_csv = extract_profile_values(
+        hdf_path=hdf_path,
+        station_map_csv=Path("data/processed/cross_sections_final.csv"),
+        out_csv=out_dir / "hdf_profiles.csv",
+    )
     typer.echo(f"Result artifacts imported: {artifact_path}")
     typer.echo(f"HDF summary: {summary_csv}")
+    typer.echo(f"Hydraulic signal summary: {signals_csv}")
+    typer.echo(f"Hydraulic profiles: {profile_csv}")
 
 
 @app.command()
@@ -203,7 +228,14 @@ def analyze(
     if not xs_csv.exists():
         raise FileNotFoundError("Missing cross_sections_final.csv. Run build-geometry first.")
 
-    section_csv = extract_required_sections(xs_csv, run_id=run_id)
+    signal_csv = Path("outputs") / run_id / "artifacts" / "hdf_hydraulic_signals.csv"
+    profile_csv = Path("outputs") / run_id / "artifacts" / "hdf_profiles.csv"
+    section_csv = extract_required_sections(
+        xs_csv,
+        run_id=run_id,
+        profile_values_csv=profile_csv,
+        signal_summary_csv=signal_csv,
+    )
     profile_png = build_longitudinal_profile(section_csv, run_id=run_id)
     metrics_csv = compute_metrics(section_csv, run_id=run_id)
     floodline = export_energy_floodline(
@@ -211,6 +243,7 @@ def analyze(
         run_id=run_id,
         target_epsg=cfg.project.target_crs_epsg,
     )
+    dxf = export_floodline_dxf(floodline, run_id=run_id)
 
     artifact_json = Path("outputs") / run_id / "artifacts" / "run_artifacts.json"
     log_issues = []
@@ -228,6 +261,7 @@ def analyze(
     typer.echo(f"Analysis complete. Profile: {profile_png}")
     typer.echo(f"Metrics: {metrics_csv}")
     typer.echo(f"Floodline: {floodline}")
+    typer.echo(f"CAD DXF: {dxf}")
     typer.echo(f"Hydraulic QA: {hyd_path}")
     typer.echo(f"Regime memo: {regime_path}")
 
@@ -265,6 +299,227 @@ def build_report_cmd(run_id: str = typer.Option("baseline")) -> None:
 
 
 @app.command()
+def doctor(
+    config: Path = typer.Option(Path("config/project.yml")),
+    out: Path = typer.Option(Path("outputs/doctor_report.md")),
+) -> None:
+    """Run environment and dependency preflight checks."""
+    configure_logging()
+    cfg = load_project_config(config)
+    checks = run_doctor_checks(cfg)
+    report = summarize_doctor(checks)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(report, encoding="utf-8")
+    typer.echo(f"Doctor report: {out}")
+    typer.echo(report)
+
+
+@app.command("run-hecras")
+def run_hecras(
+    run_id: str = typer.Option("baseline"),
+    config: Path = typer.Option(Path("config/project.yml")),
+    strict: bool = typer.Option(True, help="Fail immediately on COM setup/compute issues."),
+    auto_close_instances: bool = typer.Option(
+        False,
+        help="Auto-close running Ras.exe processes before COM automation.",
+    ),
+) -> None:
+    """Run HEC-RAS compute headlessly through COM automation."""
+    configure_logging()
+    cfg = load_project_config(config)
+    run_project_dir = Path("runs") / run_id / "ras_project"
+    sdf_path = run_project_dir / "import" / cfg.hec_ras.geometry_import_name
+    flow_json = Path("runs") / run_id / "flow" / "steady_flow.json"
+    adapter = HECRASControllerAdapter()
+    try:
+        result = adapter.run_compute(
+            run_project_dir=run_project_dir,
+            sdf_path=sdf_path,
+            flow_json=flow_json,
+            river_name=cfg.project.river_name,
+            reach_name=cfg.project.reach_name,
+            strict=strict,
+            auto_close_instances=auto_close_instances,
+        )
+    except HECControllerError as exc:
+        raise RuntimeError(f"run-hecras failed: {exc}") from exc
+
+    out_dir = Path("outputs") / run_id / "artifacts"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    com_json = out_dir / "com_run_summary.json"
+    com_json.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    typer.echo(f"HEC-RAS COM run summary: {com_json}")
+
+
+@app.command()
+def autopilot(
+    source: str = typer.Option("ref"),
+    run_id: str = typer.Option("baseline"),
+    scenario2: bool = typer.Option(True),
+    sweep: str = typer.Option("", help="Comma-separated multipliers, e.g. 1.10,1.15,1.20"),
+    strict: bool = typer.Option(False),
+    config: Path = typer.Option(Path("config/project.yml")),
+    sheets: Path = typer.Option(Path("config/sheets.yml")),
+    thresholds: Path = typer.Option(Path("config/thresholds.yml")),
+    automation: Path = typer.Option(Path("config/automation.yml")),
+    ai: Path = typer.Option(Path("config/ai.yml")),
+) -> None:
+    """Unattended end-to-end run with guardrails."""
+    configure_logging()
+    source_path = Path(source)
+    policy = load_automation_config(automation).autopilot
+    ai_cfg = load_ai_config(ai).ai
+    advisor = OpenAIAdvisor(ai_cfg)
+    orch = AutopilotOrchestrator(run_id=run_id)
+
+    def step_stage_source():
+        cfg = load_project_config(config)
+        report = stage_inputs_from_source(cfg, source_path, overwrite=True)
+        path = Path("outputs") / run_id / "autopilot" / "source_sync.json"
+        path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        orch.set_artifact("source_sync", path)
+        if report["missing"]:
+            logger.warning("Source sync missing files: %s", report["missing"])
+        return report
+
+    def step_doctor():
+        cfg = load_project_config(config)
+        checks = run_doctor_checks(cfg)
+        report = summarize_doctor(checks)
+        report_path = Path("outputs") / run_id / "autopilot" / "doctor_report.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report, encoding="utf-8")
+        if not checks.get("python_ok", False):
+            raise RuntimeError("Python 3.11+ required.")
+        orch.set_artifact("doctor_report", report_path)
+        return checks
+
+    def step_ingest():
+        ingest(config=config, sheets=sheets)
+        return "ok"
+
+    def step_complete_xs():
+        complete_xs(chainage=0.0, run_id=run_id, config=config, thresholds=thresholds)
+        return "ok"
+
+    def step_build_geometry():
+        build_geometry(run_id=run_id, config=config, thresholds=thresholds)
+        return "ok"
+
+    def step_prepare():
+        prepare_run(run_id=run_id, config=config)
+        return "ok"
+
+    def step_compute():
+        run_hecras(
+            run_id=run_id,
+            config=config,
+            strict=(strict or policy.strict_geometry),
+            auto_close_instances=not strict,
+        )
+        return "ok"
+
+    def step_import():
+        import_results(run_id=run_id)
+        return "ok"
+
+    def step_analyze():
+        analyze(run_id=run_id, config=config, thresholds=thresholds)
+        _enforce_real_hydraulics(run_id=run_id, strict=(strict or policy.strict_hydraulics))
+        return "ok"
+
+    def step_report():
+        build_report_cmd(run_id=run_id)
+        return "ok"
+
+    try:
+        orch.step("stage_source", step_stage_source)
+        orch.step("init", lambda: init())
+        orch.step("doctor", step_doctor)
+        orch.step("ingest", step_ingest)
+        orch.step("complete_xs", step_complete_xs)
+        orch.step("build_geometry", step_build_geometry)
+        orch.step("prepare_run", step_prepare)
+        orch.step("run_hecras", step_compute)
+        orch.step("import_results", step_import)
+        orch.step("analyze", step_analyze)
+        orch.step("build_report", step_report)
+
+        if scenario2 and policy.scenario2.enabled:
+            scenario_path = Path("config/scenarios/scenario_2_climate.yml")
+            sweep_vals = []
+            if sweep.strip():
+                sweep_vals = [float(x.strip()) for x in sweep.split(",") if x.strip()]
+            elif policy.scenario2.sweep_enabled:
+                sweep_vals = [float(x) for x in policy.scenario2.sweep_values]
+            if sweep_vals:
+                sweep_ids: list[str] = []
+                for idx, mult in enumerate(sweep_vals, start=1):
+                    sid = f"scenario_2_{idx}"
+                    sweep_ids.append(sid)
+                    apply_scenario_with_multiplier(
+                        run_id=sid,
+                        scenario_path=scenario_path,
+                        config_path=config,
+                        multiplier=mult,
+                    )
+                    prepare_run(run_id=sid, config=config)
+                    run_hecras(
+                        run_id=sid,
+                        config=config,
+                        strict=(strict or policy.strict_hydraulics),
+                        auto_close_instances=not strict,
+                    )
+                    import_results(run_id=sid)
+                    analyze(run_id=sid, config=config, thresholds=thresholds)
+                    _enforce_real_hydraulics(run_id=sid, strict=(strict or policy.strict_hydraulics))
+                compare(base=run_id, other=f"scenario_2_{len(sweep_vals)}")
+                _write_sweep_envelope(base_run=run_id, scenario_runs=sweep_ids)
+            else:
+                sid = "scenario_2"
+                apply_scenario_with_multiplier(
+                    run_id=sid,
+                    scenario_path=scenario_path,
+                    config_path=config,
+                    multiplier=float(policy.scenario2.fixed_multiplier),
+                )
+                prepare_run(run_id=sid, config=config)
+                run_hecras(
+                    run_id=sid,
+                    config=config,
+                    strict=(strict or policy.strict_hydraulics),
+                    auto_close_instances=not strict,
+                )
+                import_results(run_id=sid)
+                analyze(run_id=sid, config=config, thresholds=thresholds)
+                _enforce_real_hydraulics(run_id=sid, strict=(strict or policy.strict_hydraulics))
+                compare(base=run_id, other=sid)
+                build_report_cmd(run_id=sid)
+
+        # Add optional AI triage summary note.
+        triage = advisor.anomaly_triage("Autopilot completed. Summarize residual risks.")
+        triage_path = Path("outputs") / run_id / "autopilot" / "ai_triage.txt"
+        triage_path.parent.mkdir(parents=True, exist_ok=True)
+        triage_path.write_text(triage, encoding="utf-8")
+        orch.log_action(
+            f"ai_call type={advisor.last_prompt_type} response_id={advisor.last_response_id or 'n/a'}"
+        )
+        orch.set_artifact("ai_triage", triage_path)
+        orch.complete()
+        typer.echo(f"Autopilot completed for run: {run_id}")
+    except Exception as exc:
+        triage = advisor.anomaly_triage(f"Autopilot failure: {exc}")
+        triage_path = Path("outputs") / run_id / "autopilot" / "ai_triage.txt"
+        triage_path.parent.mkdir(parents=True, exist_ok=True)
+        triage_path.write_text(triage, encoding="utf-8")
+        orch.log_action(
+            f"ai_call type={advisor.last_prompt_type} response_id={advisor.last_response_id or 'n/a'}"
+        )
+        orch.set_artifact("ai_triage", triage_path)
+        raise
+
+
+@app.command()
 def pipeline(
     run_id: str = typer.Argument("baseline"),
     config: Path = typer.Option(Path("config/project.yml")),
@@ -280,7 +535,7 @@ def pipeline(
     init()
     ingest(config=config, sheets=sheets)
     complete_xs(chainage=0.0, run_id=run_id, config=config, thresholds=thresholds)
-    build_geometry(run_id=run_id, config=config)
+    build_geometry(run_id=run_id, config=config, thresholds=thresholds)
     prepare_run(run_id=run_id, config=config)
     typer.echo("Pipeline paused at manual compute gate. Complete HEC-RAS compute, then run import-results/analyze.")
 
@@ -317,6 +572,140 @@ def _issues_to_markdown(title: str, issues) -> str:
     for i in issues:
         lines.append(f"- [{i.severity.upper()}] `{i.code}`: {i.message}")
     return "\n".join(lines) + "\n"
+
+
+def _prepare_xs_geometry_input() -> Path:
+    import pandas as pd
+
+    raw_path = Path("data/processed/cross_sections_raw.csv")
+    completed_path = Path("data/processed/xs_chainage_0_completed.csv")
+    merged_path = Path("data/processed/cross_sections_merged.csv")
+
+    if not raw_path.exists():
+        raise FileNotFoundError(f"Missing required file: {raw_path}")
+    raw = pd.read_csv(raw_path)
+
+    if completed_path.exists():
+        completed = pd.read_csv(completed_path)
+        merged = pd.concat([raw.loc[raw["chainage_m"] != 0], completed], ignore_index=True)
+        merged = merged.sort_values(["chainage_m", "offset_m"]).reset_index(drop=True)
+        merged.to_csv(merged_path, index=False)
+        return merged_path
+
+    return raw_path
+
+
+def apply_scenario_with_multiplier(
+    run_id: str,
+    scenario_path: Path,
+    config_path: Path,
+    multiplier: float,
+) -> None:
+    from src.common.config import load_yaml
+    import yaml
+
+    cfg = load_project_config(config_path)
+    data = load_yaml(scenario_path)
+    data["scenario_id"] = run_id
+    data["title"] = f"Climate Intensification x{multiplier:.2f}"
+    data["flow_multiplier_upstream"] = multiplier
+    data["flow_multiplier_tributary"] = multiplier
+    tmp = Path("runs") / run_id / "scenario_runtime.yml"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(yaml.safe_dump(data), encoding="utf-8")
+    spec = load_scenario(tmp)
+    flow_json, flow_csv = write_steady_flow_payload(cfg.hydraulics, run_id=run_id, scenario=spec)
+    typer.echo(f"Scenario payload written: {flow_json}")
+    typer.echo(f"Scenario table: {flow_csv}")
+
+
+def _enforce_real_hydraulics(run_id: str, strict: bool) -> None:
+    import pandas as pd
+
+    sections_path = Path("outputs") / run_id / "sections" / "required_sections.csv"
+    if not sections_path.exists():
+        raise RuntimeError(f"Missing required sections output: {sections_path}")
+
+    sections = pd.read_csv(sections_path)
+    if sections.empty:
+        raise RuntimeError(f"Sections output is empty: {sections_path}")
+
+    if "hydraulic_source" not in sections.columns:
+        if strict:
+            raise RuntimeError("Hydraulic source provenance missing from required sections.")
+        return
+
+    sources = set(sections["hydraulic_source"].dropna().astype(str).unique())
+    non_computed = {"fallback", "signal_summary"}
+    if strict and sources.intersection(non_computed):
+        raise RuntimeError(
+            "Strict hydraulic mode requires computed profile data from plan-result HDF; "
+            f"found sources: {sorted(sources)}"
+        )
+
+
+def _write_sweep_envelope(base_run: str, scenario_runs: list[str]) -> Path:
+    import pandas as pd
+
+    base_path = Path("outputs") / base_run / "tables" / "metrics.csv"
+    if not base_path.exists():
+        raise FileNotFoundError(f"Missing baseline metrics: {base_path}")
+    base_df = pd.read_csv(base_path)
+    if base_df.empty:
+        raise ValueError("Baseline metrics are empty; cannot build sweep envelope.")
+    base = base_df.iloc[0]
+
+    rows = []
+    for rid in scenario_runs:
+        p = Path("outputs") / rid / "tables" / "metrics.csv"
+        if not p.exists():
+            continue
+        df = pd.read_csv(p)
+        if df.empty:
+            continue
+        r = df.iloc[0]
+        rows.append(
+            {
+                "run_id": rid,
+                "max_wse_m": float(r["max_wse_m"]),
+                "max_velocity_mps": float(r["max_velocity_mps"]),
+                "delta_wse_m": float(r["max_wse_m"] - base["max_wse_m"]),
+                "delta_velocity_mps": float(r["max_velocity_mps"] - base["max_velocity_mps"]),
+            }
+        )
+
+    if not rows:
+        raise ValueError("No scenario metrics found for sweep envelope.")
+
+    df = pd.DataFrame(rows).sort_values("run_id").reset_index(drop=True)
+    envelope = pd.DataFrame(
+        [
+            {
+                "metric": "max_wse_m",
+                "baseline": float(base["max_wse_m"]),
+                "scenario_min": float(df["max_wse_m"].min()),
+                "scenario_max": float(df["max_wse_m"].max()),
+                "delta_min": float(df["delta_wse_m"].min()),
+                "delta_max": float(df["delta_wse_m"].max()),
+            },
+            {
+                "metric": "max_velocity_mps",
+                "baseline": float(base["max_velocity_mps"]),
+                "scenario_min": float(df["max_velocity_mps"].min()),
+                "scenario_max": float(df["max_velocity_mps"].max()),
+                "delta_min": float(df["delta_velocity_mps"].min()),
+                "delta_max": float(df["delta_velocity_mps"].max()),
+            },
+        ]
+    )
+
+    out_dir = Path("outputs") / base_run / "comparison"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    detail_path = out_dir / "scenario2_sweep_runs.csv"
+    env_path = out_dir / "scenario2_sweep_envelope.csv"
+    df.to_csv(detail_path, index=False)
+    envelope.to_csv(env_path, index=False)
+    return env_path
 
 
 if __name__ == "__main__":

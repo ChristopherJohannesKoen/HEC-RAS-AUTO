@@ -11,8 +11,8 @@ def parse_ras_log(log_path: Path) -> list[QAIssue]:
     issues: list[QAIssue] = []
     text = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
     for idx, line in enumerate(text, start=1):
-        l = line.lower()
-        if "error" in l:
+        lowered = line.lower()
+        if "error" in lowered:
             issues.append(
                 QAIssue(
                     severity="error",
@@ -21,7 +21,7 @@ def parse_ras_log(log_path: Path) -> list[QAIssue]:
                     location=f"{log_path}:{idx}",
                 )
             )
-        elif "warning" in l:
+        elif "warning" in lowered:
             issues.append(
                 QAIssue(
                     severity="warn",

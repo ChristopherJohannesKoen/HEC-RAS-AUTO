@@ -23,6 +23,7 @@ def build_report(
         metrics_table=load_metrics_markdown(run_id),
         figure_list=figure_list_markdown(run_id),
         scenario_notes=scenario_notes(run_id),
+        ai_notes=_load_ai_notes(run_id),
         assumptions=[
             "[VERIFY] Confirm bank station placements in HEC-RAS geometry editor.",
             "[VERIFY] Confirm selected flow regime (subcritical/supercritical/mixed).",
@@ -34,3 +35,10 @@ def build_report(
     out_path = out_dir / f"{run_id}_report_draft.md"
     out_path.write_text(rendered, encoding="utf-8")
     return out_path
+
+
+def _load_ai_notes(run_id: str, output_root: Path = Path("outputs")) -> str:
+    p = output_root / run_id / "autopilot" / "ai_triage.txt"
+    if not p.exists():
+        return "_AI advisory not available for this run._"
+    return p.read_text(encoding="utf-8").strip() or "_AI advisory file was empty._"
