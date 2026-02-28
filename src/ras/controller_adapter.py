@@ -121,6 +121,149 @@ class HECRASControllerAdapter:
         project_file: Path,
         strict: bool,
     ) -> dict[str, object]:
+        # Primary unattended strategy: explicit current-plan compute using a
+        # batch command pattern proven in HEC-Commander workflows:
+        #   "Ras.exe" -c "project.prj" "plan.p##"
+        primary = self._run_compute_cli_current_plan(
+            ras_exe=ras_exe,
+            run_dir=run_dir,
+            project_file=project_file,
+            strict=False,
+        )
+        if primary.get("success", False):
+            return primary
+
+        # Secondary fallback: HEC-RAS test mode.
+        fallback = self._run_compute_cli_test_mode(
+            ras_exe=ras_exe,
+            run_dir=run_dir,
+            project_file=project_file,
+            strict=False,
+        )
+        msgs = []
+        prim_msgs = primary.get("messages", [])
+        if isinstance(prim_msgs, list):
+            msgs.extend([str(m) for m in prim_msgs])
+        msgs.append("Primary CLI mode (-c project+plan) produced no native result artifacts.")
+        fb_msgs = fallback.get("messages", [])
+        if isinstance(fb_msgs, list):
+            msgs.extend([str(m) for m in fb_msgs])
+        fallback["messages"] = msgs
+        success = bool(fallback.get("success", False))
+        if strict and not success:
+            raise HECControllerError(
+                "CLI compute finished without native result artifacts in both -c and -test modes. "
+                "Check HEC-RAS popups/logs and HECRASPlotDriverError.txt."
+            )
+        return fallback
+
+    def _run_compute_cli_current_plan(
+        self,
+        ras_exe: Path,
+        run_dir: Path,
+        project_file: Path,
+        strict: bool,
+    ) -> dict[str, object]:
+        self._clear_readonly(run_dir)
+        self._repair_plotdriver_state()
+        env = self._build_cli_env(run_dir)
+        project_abs = project_file.resolve()
+        plan_abs = self._pick_plan_file(run_dir, project_abs).resolve()
+        bat_path = run_dir / "_hec_run_compute.bat"
+        bat_cmd = f"\"{ras_exe}\" -c \"{project_abs}\" \"{plan_abs}\""
+        bat_path.write_text(f"@echo off\r\n{bat_cmd}\r\n", encoding="utf-8")
+        try:
+            proc = subprocess.Popen(
+                ["cmd.exe", "/c", str(bat_path)],
+                cwd=str(run_dir),
+                env=env,
+                shell=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except Exception as exc:
+            raise HECControllerError(f"Failed to start Ras.exe current-plan batch compute: {exc}") from exc
+
+        start = time.time()
+        stall_timeout_sec = max(180, min(self.timeout_sec // 2, 600))
+        last_activity = time.time()
+        last_seen_mtime = 0.0
+        while proc.poll() is None:
+            self._dismiss_ras_dialogs(aggressive=True)
+            try:
+                mtimes = [p.stat().st_mtime for p in run_dir.iterdir()]
+                if mtimes:
+                    current_mtime = max(mtimes)
+                    if current_mtime > last_seen_mtime:
+                        last_seen_mtime = current_mtime
+                        last_activity = time.time()
+            except Exception:
+                pass
+            if (time.time() - last_activity) > stall_timeout_sec:
+                self._close_running_instances()
+                raise HECControllerError(
+                    f"Ras.exe current-plan batch stalled with no file activity for {stall_timeout_sec}s; "
+                    "likely waiting on internal error dialog or failed compute state."
+                )
+            if (time.time() - start) > self.timeout_sec:
+                self._close_running_instances()
+                raise HECControllerError(
+                    f"Ras.exe current-plan batch compute timed out after {self.timeout_sec}s."
+                )
+            time.sleep(0.5)
+
+        stdout = ""
+        stderr = ""
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except Exception:
+            pass
+        artifacts = self._collect_output_files(run_dir)
+        messages: list[str] = [
+            f"CLI command (bat): {bat_cmd}",
+            f"CLI return code: {proc.returncode}",
+        ]
+        if stdout.strip():
+            messages.append(f"CLI stdout: {stdout.strip()[:4000]}")
+        if stderr.strip():
+            messages.append(f"CLI stderr: {stderr.strip()[:4000]}")
+
+        success = bool(artifacts["hdf_files"] or artifacts["output_files"])
+        if strict and not success:
+            raise HECControllerError(
+                "CLI current-plan batch compute finished without result artifacts (*.p##.hdf or *.O##). "
+                "Check HEC-RAS popups/logs and HECRASPlotDriverError.txt."
+            )
+
+        try:
+            bat_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        return {
+            "success": success,
+            "messages": messages,
+            "current_plan": "",
+            "current_geom": "",
+            "current_steady": "",
+            "compute_message_count": 0,
+            "compute_blocking_mode": True,
+            "plan_files": artifacts["plan_files"],
+            "hdf_files": artifacts["hdf_files"],
+            "output_files": artifacts["output_files"],
+            "log_files": artifacts["log_files"],
+            "backend": "cli",
+            "ras_exe": str(ras_exe),
+        }
+
+    def _run_compute_cli_test_mode(
+        self,
+        ras_exe: Path,
+        run_dir: Path,
+        project_file: Path,
+        strict: bool,
+    ) -> dict[str, object]:
         self._clear_readonly(run_dir)
         self._repair_plotdriver_state()
         env = self._build_cli_env(run_dir)
@@ -129,12 +272,10 @@ class HECRASControllerAdapter:
         if test_dir.exists():
             shutil.rmtree(test_dir, ignore_errors=True)
 
-        # Use HEC-RAS test batch mode for unattended compute. It clones to
-        # "<project_dir> [Test]" and exits on completion.
-        command_line = f'"{ras_exe}" "{project_abs}" -test -hideCompute'
+        cmd = [str(ras_exe), str(project_abs), "-test", "-hideCompute"]
         try:
             proc = subprocess.Popen(
-                command_line,
+                cmd,
                 cwd=str(run_dir.parent),
                 env=env,
                 shell=False,
@@ -146,10 +287,10 @@ class HECRASControllerAdapter:
             raise HECControllerError(f"Failed to start Ras.exe test-batch compute: {exc}") from exc
 
         start = time.time()
-        forced_stop = False
         error_text = ""
         last_activity = time.time()
         last_seen_mtime = 0.0
+        stall_timeout_sec = max(180, min(self.timeout_sec // 2, 600))
         while proc.poll() is None:
             self._dismiss_ras_dialogs(aggressive=True)
             if test_dir.exists():
@@ -162,31 +303,20 @@ class HECRASControllerAdapter:
                             last_activity = time.time()
                 except Exception:
                     pass
-                testing_file = next(test_dir.glob("*.testing.txt"), None)
-                if testing_file and testing_file.exists():
-                    try:
-                        content = testing_file.read_text(encoding="utf-8", errors="ignore")
-                        if "Success - testing program closing normally" in content:
-                            forced_stop = True
-                            self._close_running_instances()
-                            break
-                    except Exception:
-                        pass
                 data_error_file = next(test_dir.glob("*.data_errors.txt"), None)
                 if data_error_file and data_error_file.exists():
                     try:
                         err = data_error_file.read_text(encoding="utf-8", errors="ignore")
                         if "Unable to delete temporary results file" in err:
                             error_text = err.strip()
-                            forced_stop = True
                             self._close_running_instances()
                             break
                     except Exception:
                         pass
-            if (time.time() - last_activity) > 90:
+            if (time.time() - last_activity) > stall_timeout_sec:
                 self._close_running_instances()
                 raise HECControllerError(
-                    "Ras.exe test-batch stalled with no file activity for 90s; "
+                    f"Ras.exe test-batch stalled with no file activity for {stall_timeout_sec}s; "
                     "likely waiting on internal error dialog or failed compute state."
                 )
             if (time.time() - start) > self.timeout_sec:
@@ -205,8 +335,6 @@ class HECRASControllerAdapter:
         source_dir = test_dir if test_dir.exists() else run_dir
         source_artifacts = self._collect_output_files(source_dir)
 
-        # Copy generated test artifacts back into the run directory so downstream
-        # tooling can stay path-stable.
         for pattern in ("*.p??.hdf", "*.p??.tmp.hdf", "*.g??.hdf", "*.o??", "*.computeMsgs.txt", "*.testing.txt"):
             for file_path in source_dir.glob(pattern):
                 try:
@@ -215,12 +343,10 @@ class HECRASControllerAdapter:
                     pass
         artifacts = self._collect_output_files(run_dir)
         messages: list[str] = [
-            f"CLI command: {command_line}",
+            "CLI command: " + " ".join(f"\"{a}\"" if " " in a else a for a in cmd),
             f"CLI return code: {proc.returncode}",
             f"CLI test folder: {test_dir}",
         ]
-        if forced_stop:
-            messages.append("CLI process was force-closed after test results/error marker was detected.")
         if error_text:
             messages.append(f"CLI data error: {error_text[:2000]}")
         if stdout.strip():
@@ -758,6 +884,38 @@ class HECRASControllerAdapter:
 
         preferred = [p for p in non_empty if p.name.lower() == "meerlustkloof.prj"]
         return preferred[0] if preferred else non_empty[0]
+
+    @staticmethod
+    def _pick_plan_file(run_dir: Path, project_file: Path) -> Path:
+        preferred_name = ""
+        try:
+            text = project_file.read_text(encoding="cp1252", errors="ignore")
+            for line in text.splitlines():
+                if line.startswith("Current Plan="):
+                    preferred_name = line.split("=", 1)[1].strip()
+                    break
+            if not preferred_name:
+                for line in text.splitlines():
+                    if line.startswith("Plan File="):
+                        preferred_name = line.split("=", 1)[1].strip()
+                        break
+        except Exception:
+            preferred_name = ""
+
+        candidates = sorted(
+            [p for p in run_dir.iterdir() if re.search(r"\.p\d\d$", p.name.lower()) and p.stat().st_size > 0],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            raise HECControllerError(f"No non-empty plan file (*.p##) found in {run_dir}")
+
+        if preferred_name:
+            for c in candidates:
+                if c.suffix.lower() == f".{preferred_name.lower()}":
+                    return c
+        named = [c for c in candidates if c.name.lower().endswith(".p01")]
+        return named[0] if named else candidates[0]
 
     def _com_available(self, progid: str) -> bool:
         script = f"""

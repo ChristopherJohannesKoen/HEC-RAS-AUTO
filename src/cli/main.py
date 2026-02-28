@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -346,7 +347,7 @@ def run_hecras(
         help="Auto-close running Ras.exe processes before COM automation.",
     ),
 ) -> None:
-    """Run HEC-RAS compute headlessly (CLI-first, COM fallback)."""
+    """Run HEC-RAS compute headlessly (CLI-only for v2 reliability)."""
     configure_logging()
     cfg = load_project_config(config)
     run_project_dir = Path("runs") / run_id / "ras_project"
@@ -369,9 +370,10 @@ def run_hecras(
     except HECControllerError as exc:
         raise RuntimeError(f"run-hecras failed: {exc}") from exc
 
-    # Guardrailed fallback: if non-strict compute produced no outputs, seed from
-    # latest successful local run so downstream analytics can proceed.
-    if (
+    # Optional fallback seeding is now opt-in only; default behavior is to
+    # surface native compute failures directly.
+    allow_seed = str(os.getenv("RAS_AUTO_ALLOW_SEEDED_RESULTS", "")).strip() in {"1", "true", "TRUE"}
+    if allow_seed and (
         not strict
         and (not bool(result.get("success", False)))
         and not result.get("hdf_files")
@@ -382,7 +384,8 @@ def run_hecras(
             msgs = result.get("messages", [])
             if isinstance(msgs, list):
                 msgs.append(
-                    "Compute produced no result artifacts; seeded outputs from prior successful run."
+                    "Compute produced no native artifacts; seeded outputs from prior successful run "
+                    "because RAS_AUTO_ALLOW_SEEDED_RESULTS is enabled."
                 )
                 result["messages"] = msgs
             result["seeded_from"] = seeded
@@ -401,7 +404,7 @@ def autopilot(
     run_id: str = typer.Option("baseline"),
     scenario2: bool = typer.Option(True),
     sweep: str = typer.Option("", help="Comma-separated multipliers, e.g. 1.10,1.15,1.20"),
-    strict: bool = typer.Option(False),
+    strict: bool = typer.Option(True),
     config: Path = typer.Option(Path("config/project.yml")),
     sheets: Path = typer.Option(Path("config/sheets.yml")),
     thresholds: Path = typer.Option(Path("config/thresholds.yml")),
