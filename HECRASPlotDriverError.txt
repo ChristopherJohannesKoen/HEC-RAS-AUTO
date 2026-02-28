@@ -1,9 +1,9 @@
 Main Exception: 
-Failed to save settings: An error occurred loading a configuration file: Could not find a part of the path 'C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\2djq0pza.tmp'. (C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\user.config)
+Failed to save settings: An error occurred loading a configuration file: Access to the path 'C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\mx5asfrk.tmp' is denied. (C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\user.config)
 Inner Exception: 
-An error occurred loading a configuration file: Could not find a part of the path 'C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\2djq0pza.tmp'. (C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\user.config)
+An error occurred loading a configuration file: Access to the path 'C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\mx5asfrk.tmp' is denied. (C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\user.config)
 Inner Exception: 
-Could not find a part of the path 'C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\2djq0pza.tmp'.
+Access to the path 'C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\mx5asfrk.tmp' is denied.
 
 Stack Trace: 
    at System.Configuration.ClientSettingsStore.WriteSettings(String sectionName, Boolean isRoaming, IDictionary newSettings)

@@ -32,7 +32,7 @@ class HECRASControllerAdapter:
                 "powershell",
                 "-NoProfile",
                 "-Command",
-                "Get-Process Ras -ErrorAction SilentlyContinue | Measure-Object | % Count",
+                "(@(Get-Process Ras -ErrorAction SilentlyContinue) + @(Get-Process RasProcess -ErrorAction SilentlyContinue)).Count",
             ],
             capture_output=True,
             text=True,
@@ -133,26 +133,75 @@ class HECRASControllerAdapter:
         # "<project_dir> [Test]" and exits on completion.
         command_line = f'"{ras_exe}" "{project_abs}" -test -hideCompute'
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 command_line,
                 cwd=str(run_dir.parent),
                 env=env,
                 shell=False,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.timeout_sec,
-                check=False,
             )
-        except subprocess.TimeoutExpired as exc:
-            self._close_running_instances()
-            raise HECControllerError(
-                f"Ras.exe test-batch compute timed out after {self.timeout_sec}s."
-            ) from exc
         except Exception as exc:
             raise HECControllerError(f"Failed to start Ras.exe test-batch compute: {exc}") from exc
 
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
+        start = time.time()
+        forced_stop = False
+        error_text = ""
+        last_activity = time.time()
+        last_seen_mtime = 0.0
+        while proc.poll() is None:
+            self._dismiss_ras_dialogs(aggressive=True)
+            if test_dir.exists():
+                try:
+                    mtimes = [p.stat().st_mtime for p in test_dir.iterdir()]
+                    if mtimes:
+                        current_mtime = max(mtimes)
+                        if current_mtime > last_seen_mtime:
+                            last_seen_mtime = current_mtime
+                            last_activity = time.time()
+                except Exception:
+                    pass
+                testing_file = next(test_dir.glob("*.testing.txt"), None)
+                if testing_file and testing_file.exists():
+                    try:
+                        content = testing_file.read_text(encoding="utf-8", errors="ignore")
+                        if "Success - testing program closing normally" in content:
+                            forced_stop = True
+                            self._close_running_instances()
+                            break
+                    except Exception:
+                        pass
+                data_error_file = next(test_dir.glob("*.data_errors.txt"), None)
+                if data_error_file and data_error_file.exists():
+                    try:
+                        err = data_error_file.read_text(encoding="utf-8", errors="ignore")
+                        if "Unable to delete temporary results file" in err:
+                            error_text = err.strip()
+                            forced_stop = True
+                            self._close_running_instances()
+                            break
+                    except Exception:
+                        pass
+            if (time.time() - last_activity) > 90:
+                self._close_running_instances()
+                raise HECControllerError(
+                    "Ras.exe test-batch stalled with no file activity for 90s; "
+                    "likely waiting on internal error dialog or failed compute state."
+                )
+            if (time.time() - start) > self.timeout_sec:
+                self._close_running_instances()
+                raise HECControllerError(
+                    f"Ras.exe test-batch compute timed out after {self.timeout_sec}s."
+                )
+            time.sleep(0.5)
+
+        stdout = ""
+        stderr = ""
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except Exception:
+            pass
         source_dir = test_dir if test_dir.exists() else run_dir
         source_artifacts = self._collect_output_files(source_dir)
 
@@ -170,6 +219,10 @@ class HECRASControllerAdapter:
             f"CLI return code: {proc.returncode}",
             f"CLI test folder: {test_dir}",
         ]
+        if forced_stop:
+            messages.append("CLI process was force-closed after test results/error marker was detected.")
+        if error_text:
+            messages.append(f"CLI data error: {error_text[:2000]}")
         if stdout.strip():
             messages.append(f"CLI stdout: {stdout.strip()[:4000]}")
         if stderr.strip():
@@ -684,7 +737,7 @@ class HECRASControllerAdapter:
                 "powershell",
                 "-NoProfile",
                 "-Command",
-                "Get-Process Ras -ErrorAction SilentlyContinue | Stop-Process -Force",
+                "Get-Process Ras,RasProcess -ErrorAction SilentlyContinue | Stop-Process -Force",
             ],
             capture_output=True,
             text=True,
