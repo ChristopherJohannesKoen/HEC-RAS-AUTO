@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -19,6 +19,7 @@ class AutomationPolicy(BaseModel):
     strict_geometry: bool = True
     strict_hydraulics: bool = True
     max_retries: int = 1
+    require_source_files: bool = True
     allow_fallback_xs_fill: bool = True
     scenario2: Scenario2SweepConfig = Field(default_factory=Scenario2SweepConfig)
     stop_on: list[str] = Field(default_factory=list)
@@ -31,15 +32,15 @@ class AutomationConfig(BaseModel):
 class RunStepState(BaseModel):
     step: str
     status: Literal["pending", "running", "completed", "failed", "skipped"] = "pending"
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
-    notes: str | None = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    notes: Optional[str] = None
 
 
 class RunState(BaseModel):
     run_id: str
     started_at: datetime = Field(default_factory=datetime.utcnow)
-    finished_at: datetime | None = None
+    finished_at: Optional[datetime] = None
     status: Literal["running", "completed", "failed"] = "running"
     steps: list[RunStepState] = Field(default_factory=list)
     artifacts: dict[str, str] = Field(default_factory=dict)
@@ -51,5 +52,5 @@ class AutopilotIssue(BaseModel):
     stage: str
     message: str
     evidence: list[Path] = Field(default_factory=list)
-    suggested_recovery: str | None = None
+    suggested_recovery: Optional[str] = None
     terminal: bool = False

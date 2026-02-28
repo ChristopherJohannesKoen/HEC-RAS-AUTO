@@ -18,14 +18,20 @@ class HECRASControllerAdapter:
     timeout_sec: int = 600
 
     def detect_progid(self) -> str:
-        for progid in ("RAS67.HECRASController", "RAS66.HECRASController"):
+        # Prefer HEC-RAS 6.6 by default, then fall back to 6.7.
+        for progid in ("RAS66.HECRASController", "RAS67.HECRASController"):
             if self._com_available(progid):
                 return progid
-        raise HECControllerError("No compatible HEC-RAS COM ProgID found (RAS67/RAS66).")
+        raise HECControllerError("No compatible HEC-RAS COM ProgID found (RAS66/RAS67).")
 
     def check_no_running_instances(self, auto_close: bool = False) -> None:
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", "Get-Process Ras -ErrorAction SilentlyContinue | Measure-Object | % Count"],
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-Process Ras -ErrorAction SilentlyContinue | Measure-Object | % Count",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -52,101 +58,150 @@ class HECRASControllerAdapter:
         reach_name: str,
         strict: bool = True,
         auto_close_instances: bool = False,
-    ) -> dict[str, str | bool]:
+        apply_flow_via_com: bool = False,
+    ) -> dict[str, object]:
+        # sdf_path is kept for interface compatibility; file-first mode does not
+        # require geometry import at compute time.
+        _ = sdf_path
+
         progid = self.detect_progid()
+        run_project_dir = run_project_dir.resolve()
         self.check_no_running_instances(auto_close=auto_close_instances)
-        project_files = list(run_project_dir.glob("*.prj"))
-        if not project_files:
-            raise HECControllerError(f"No .prj found in run project directory: {run_project_dir}")
-        prj = project_files[0]
+        prj = self._pick_project_file(run_project_dir).resolve()
+        if not flow_json.exists():
+            raise HECControllerError(f"Missing steady flow payload: {flow_json}")
+        flow_payload = json.loads(flow_json.read_text(encoding="utf-8"))
 
-        payload = {
-            "project": str(prj.resolve()),
-            "sdf": str(sdf_path.resolve()),
-            "flow_json": str(flow_json.resolve()),
-            "river_name": river_name,
-            "reach_name": reach_name,
-            "progid": progid,
-            "strict": strict,
-            "run_project_dir": str(run_project_dir.resolve()),
-        }
-        try:
-            return self._run_controller_pywin32(payload)
-        except ImportError:
-            # Fallback path for environments without pywin32.
-            return self._run_controller_script(payload)
+        return self._run_controller_pywin32(
+            progid=progid,
+            run_dir=run_project_dir,
+            project_file=prj,
+            strict=strict,
+            flow_payload=flow_payload,
+            river_name=river_name,
+            reach_name=reach_name,
+            apply_flow_via_com=apply_flow_via_com,
+        )
 
-    def _run_controller_pywin32(self, payload: dict[str, object]) -> dict[str, str | bool]:
+    def _run_controller_pywin32(
+        self,
+        progid: str,
+        run_dir: Path,
+        project_file: Path,
+        strict: bool,
+        flow_payload: dict[str, object],
+        river_name: str,
+        reach_name: str,
+        apply_flow_via_com: bool,
+    ) -> dict[str, object]:
         import win32com.client  # type: ignore[import-not-found]
 
         messages: list[str] = []
-        run_dir = Path(str(payload["run_project_dir"]))
-        strict = bool(payload.get("strict", True))
+        project_abs = project_file.resolve()
+        original_cwd = Path.cwd()
         os.chdir(run_dir)
 
-        obj = win32com.client.Dispatch(str(payload["progid"]))
+        obj = win32com.client.gencache.EnsureDispatch(progid)
         try:
-            dismissed = self._dismiss_ras_dialogs()
-            if dismissed:
-                messages.append(f"Dismissed startup RAS dialogs: {dismissed}")
-
-            obj.Project_Open(str(payload["project"]))
+            obj.Project_Open(str(project_abs))
             time.sleep(0.4)
-            dismissed = self._dismiss_ras_dialogs()
-            if dismissed:
-                messages.append(f"Dismissed post-open RAS dialogs: {dismissed}")
 
             current_project = self._safe_call(obj, "CurrentProjectFile")
             if not current_project:
-                raise HECControllerError(
-                    "Project_Open did not load a project (CurrentProjectFile empty). "
-                    "Check HEC-RAS startup dialogs/permissions."
+                self._dismiss_ras_dialogs()
+                time.sleep(0.2)
+                current_project = self._safe_call(obj, "CurrentProjectFile")
+            if current_project:
+                messages.append(f"Project opened: {current_project}")
+            else:
+                messages.append(
+                    "Project_Open completed but CurrentProjectFile is empty; "
+                    "continuing with compute path and validating via result artifacts."
                 )
-            messages.append(f"Project opened: {current_project}")
 
-            self._ensure_plan_active(obj, messages, strict=strict)
-
-            obj.Geometry_GISImport("SDF Import", str(payload["sdf"]))
-            messages.append("Geometry_GISImport completed")
-            time.sleep(0.3)
-            dismissed = self._dismiss_ras_dialogs()
-            if dismissed:
-                messages.append(f"Dismissed post-import RAS dialogs: {dismissed}")
-
+            # Plan activation via COM can be brittle across versions; avoid hard fail here
+            # and rely on compute/result artifact checks for final validation.
+            self._ensure_plan_active(obj, messages, strict=False)
+            if apply_flow_via_com:
+                self._apply_steady_flow(
+                    obj=obj,
+                    flow_payload=flow_payload,
+                    river_name=river_name,
+                    reach_name=reach_name,
+                    messages=messages,
+                    strict=strict,
+                )
             obj.Project_Save()
-            self._ensure_plan_active(obj, messages, strict=strict)
-
-            flow = json.loads(Path(str(payload["flow_json"])).read_text(encoding="utf-8"))
-            try:
-                obj.SteadyFlow_ClearFlowData()
-                us_station = str(flow.get("upstream_station_hint") or "3905")
-                tr_station = str(flow.get("tributary_station_hint") or "2405")
-                q_up = [float(flow["upstream_flow_cms"])]
-                q_tr = [float(flow["upstream_flow_cms"]) + float(flow["tributary_flow_cms"])]
-                obj.SteadyFlow_SetFlow(str(payload["river_name"]), str(payload["reach_name"]), us_station, q_up)
-                obj.SteadyFlow_SetFlow(str(payload["river_name"]), str(payload["reach_name"]), tr_station, q_tr)
-                bc = [float(flow["downstream_normal_depth_slope"])]
-                obj.SteadyFlow_FixedWSBoundary(str(payload["river_name"]), str(payload["reach_name"]), False, bc)
-                messages.append("Steady flow and boundary attempted")
-            except Exception as exc:
-                messages.append(f"Steady flow setup warning: {exc}")
-                if strict:
-                    raise
 
             try:
-                compute_raw = obj.Compute_CurrentPlan()
-                ok = self._coerce_compute_ok(compute_raw)
-                messages.append(f"Compute_CurrentPlan returned: {ok}")
-                if not ok and strict:
-                    raise HECControllerError("Compute_CurrentPlan returned false")
+                compute_raw = obj.Compute_CurrentPlan(0, None, True)
             except Exception as exc:
                 raise HECControllerError(f"Compute_CurrentPlan failed: {exc}") from exc
+
+            ok, nmsg, comp_msgs, blocking_mode = self._parse_compute_result(compute_raw)
+            messages.append(f"Compute_CurrentPlan returned: {ok}")
+            if comp_msgs:
+                messages.extend([f"COMPUTE: {m}" for m in comp_msgs])
+
+            if not ok:
+                lowered = [m.lower() for m in comp_msgs]
+                if any("overflow" in m for m in lowered):
+                    messages.append(
+                        "Overflow detected; switching plan to Subcritical Flow and retrying once."
+                    )
+                    self._set_plan_regime_on_disk(run_dir, "Subcritical Flow")
+                    try:
+                        obj.Project_Close()
+                    except Exception:
+                        pass
+                    obj.Project_Open(str(project_abs))
+                    time.sleep(0.4)
+                    try:
+                        compute_raw = obj.Compute_CurrentPlan(0, None, True)
+                    except Exception as exc:
+                        raise HECControllerError(
+                            f"Compute_CurrentPlan retry after overflow failed: {exc}"
+                        ) from exc
+                    ok, nmsg, comp_msgs, blocking_mode = self._parse_compute_result(compute_raw)
+                    messages.append(f"Compute overflow-retry returned: {ok}")
+                    if comp_msgs:
+                        messages.extend([f"COMPUTE(RETRY-OVERFLOW): {m}" for m in comp_msgs])
+
+                if not ok:
+                    messages.append(
+                        "Compute returned false; retrying once with COM flow/boundary reapplication."
+                    )
+                    self._apply_steady_flow(
+                        obj=obj,
+                        flow_payload=flow_payload,
+                        river_name=river_name,
+                        reach_name=reach_name,
+                        messages=messages,
+                        strict=False,
+                    )
+                    try:
+                        compute_raw = obj.Compute_CurrentPlan(0, None, True)
+                    except Exception as exc:
+                        raise HECControllerError(f"Compute_CurrentPlan retry failed: {exc}") from exc
+                    ok, nmsg, comp_msgs, blocking_mode = self._parse_compute_result(compute_raw)
+                    messages.append(f"Compute flow-retry returned: {ok}")
+                    if comp_msgs:
+                        messages.extend([f"COMPUTE(RETRY-FLOW): {m}" for m in comp_msgs])
+
+            if strict and not ok:
+                raise HECControllerError(
+                    "Compute did not complete successfully. "
+                    "Review .computeMsgs.txt/.log for missing boundary/flow/geometry inputs."
+                )
 
             current_plan = self._safe_call(obj, "CurrentPlanFile")
             current_geom = self._safe_call(obj, "CurrentGeomFile")
             current_steady = self._safe_call(obj, "CurrentSteadyFile")
 
-            obj.Project_Save()
+            try:
+                obj.Project_Save()
+            except Exception:
+                pass
             try:
                 obj.Project_Close()
             except Exception:
@@ -154,45 +209,148 @@ class HECRASControllerAdapter:
 
             plans = sorted(run_dir.glob("*.p??"), key=lambda p: p.stat().st_mtime, reverse=True)
             hdfs = sorted(
-                [
-                    p
-                    for p in run_dir.glob("*.hdf")
-                    if (
-                        ".p" in p.name.lower()
-                        and p.suffix.lower() == ".hdf"
-                        and ".g" not in p.name.lower()
-                    )
-                    or "plan" in p.name.lower()
-                    or "results" in p.name.lower()
-                ],
+                [p for p in run_dir.glob("*.hdf") if self._is_plan_hdf(p)],
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
+            outputs = sorted(run_dir.glob("*.o??"), key=lambda p: p.stat().st_mtime, reverse=True)
             logs = sorted(run_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
 
-            if strict:
-                if not plans:
-                    raise HECControllerError("No plan file (*.p##) found after compute.")
-                if not hdfs:
-                    raise HECControllerError("No plan-result HDF found after compute.")
+            if strict and not plans:
+                raise HECControllerError("No plan file (*.p##) found after compute.")
+            if strict and not hdfs and not outputs:
+                raise HECControllerError(
+                    "No result artifacts (*.p##.hdf or *.o##) found after compute."
+                )
 
             return {
-                "success": True,
+                "success": bool(ok),
                 "messages": messages,
                 "current_plan": current_plan,
                 "current_geom": current_geom,
                 "current_steady": current_steady,
-                "compute_message_count": 0,
+                "compute_message_count": nmsg,
+                "compute_blocking_mode": bool(blocking_mode),
                 "plan_files": [str(p.resolve()) for p in plans],
                 "hdf_files": [str(p.resolve()) for p in hdfs],
+                "output_files": [str(p.resolve()) for p in outputs],
                 "log_files": [str(p.resolve()) for p in logs],
             }
         finally:
-            self._dismiss_ras_dialogs()
             try:
                 obj.QuitRas()
             except Exception:
                 pass
+            try:
+                os.chdir(original_cwd)
+            except Exception:
+                pass
+
+    def _apply_steady_flow(
+        self,
+        obj: object,
+        flow_payload: dict[str, object],
+        river_name: str,
+        reach_name: str,
+        messages: list[str],
+        strict: bool,
+    ) -> None:
+        up_q = float(flow_payload["upstream_flow_cms"])
+        tr_q = float(flow_payload["tributary_flow_cms"])
+        up_station = self._fmt_station(flow_payload.get("upstream_station_hint", 3905.0))
+        tr_station = self._fmt_station(flow_payload.get("tributary_station_hint", 2405.0))
+        # HEC-RAS COM expects 1-based profile arrays; prepend a dummy element.
+        up_arr = [0.0, up_q]
+        tr_arr = [0.0, up_q + tr_q]
+
+        try:
+            getattr(obj, "SteadyFlow_SetFlow")(river_name, reach_name, up_station, up_arr)
+            getattr(obj, "SteadyFlow_SetFlow")(river_name, reach_name, tr_station, tr_arr)
+            messages.append(
+                "Steady flow set via COM "
+                f"(US {up_station}={up_q:.3f} cms, TR {tr_station}={up_q + tr_q:.3f} cms). "
+                "Boundary conditions remain file-defined."
+            )
+        except Exception as exc:
+            messages.append(f"Steady flow COM setup warning: {exc}")
+            if strict:
+                raise HECControllerError(f"Steady flow setup failed: {exc}") from exc
+
+    @staticmethod
+    def _set_plan_regime_on_disk(run_dir: Path, regime: str) -> None:
+        p01 = run_dir / "Meerlustkloof.p01"
+        if not p01.exists():
+            return
+        text = p01.read_text(encoding="cp1252", errors="ignore")
+        lines = [ln.rstrip("\r") for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+        regimes = {"Subcritical Flow", "Supercritical Flow", "Mixed Flow"}
+        replaced = False
+        for i, line in enumerate(lines):
+            if line.strip() in regimes:
+                lines[i] = regime
+                replaced = True
+                break
+        if not replaced:
+            insert_at = 4 if len(lines) >= 4 else len(lines)
+            lines.insert(insert_at, regime)
+        p01.write_text("\n".join(lines).rstrip() + "\n", encoding="cp1252")
+
+    def _run_controller_script(
+        self,
+        progid: str,
+        run_dir: Path,
+        project_file: Path,
+        strict: bool,
+    ) -> dict[str, object]:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            ps1 = td_path / "run_hecras.ps1"
+            ps1.write_text(self._controller_script(), encoding="utf-8")
+            in_json = td_path / "in.json"
+            out_json = td_path / "out.json"
+            in_json.write_text(
+                json.dumps(
+                    {
+                        "progid": progid,
+                        "run_dir": str(run_dir.resolve()),
+                        "project_file": str(project_file.resolve()),
+                        "strict": bool(strict),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ps1),
+                    "-InputJson",
+                    str(in_json),
+                    "-OutputJson",
+                    str(out_json),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.timeout_sec,
+            )
+            if proc.returncode != 0:
+                details = out_json.read_text(encoding="utf-8", errors="ignore") if out_json.exists() else ""
+                raise HECControllerError(
+                    "HEC-RAS PowerShell COM run failed.\n"
+                    f"stdout:\n{proc.stdout}\n"
+                    f"stderr:\n{proc.stderr}\n"
+                    f"details:\n{details}"
+                )
+            if not out_json.exists():
+                raise HECControllerError("HEC-RAS PowerShell COM run produced no output payload.")
+            data = json.loads(out_json.read_text(encoding="utf-8"))
+            if not data.get("success", False):
+                raise HECControllerError(str(data.get("error", "Unknown PowerShell COM error")))
+            return data
 
     @staticmethod
     def _safe_call(obj: object, method_name: str) -> str:
@@ -204,20 +362,11 @@ class HECRASControllerAdapter:
         except Exception:
             return ""
 
-    @staticmethod
-    def _coerce_compute_ok(raw: object) -> bool:
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, (tuple, list)) and raw:
-            return bool(raw[0])
-        if raw is None:
-            return False
-        return bool(raw)
-
     def _ensure_plan_active(self, obj: object, messages: list[str], strict: bool) -> None:
         cur_plan = self._safe_call(obj, "CurrentPlanFile")
         if cur_plan:
             return
+
         set_ok = False
         for candidate in ("Plan 01", "p01"):
             try:
@@ -229,13 +378,51 @@ class HECRASControllerAdapter:
             if cur_plan:
                 return
             if set_ok:
-                # Some versions return success but update current plan lazily.
                 time.sleep(0.2)
                 cur_plan = self._safe_call(obj, "CurrentPlanFile")
                 if cur_plan:
                     return
+
         if strict:
-            raise HECControllerError("No current plan active after project open/import (expected Plan 01/p01).")
+            raise HECControllerError(
+                "No current plan active after project open (expected Plan 01/p01)."
+            )
+
+    @staticmethod
+    def _parse_compute_result(raw: object) -> tuple[bool, int, list[str], bool]:
+        if isinstance(raw, tuple):
+            ok = bool(raw[0]) if len(raw) > 0 else False
+            nmsg = int(raw[1]) if len(raw) > 1 and raw[1] is not None else 0
+            msgs = [str(m) for m in raw[2]] if len(raw) > 2 and raw[2] is not None else []
+            blocking = bool(raw[3]) if len(raw) > 3 else True
+            return ok, nmsg, msgs, blocking
+        if isinstance(raw, list):
+            ok = bool(raw[0]) if raw else False
+            return ok, 0, [], True
+        if isinstance(raw, bool):
+            return raw, 0, [], True
+        if raw is None:
+            return False, 0, [], True
+        return bool(raw), 0, [], True
+
+    @staticmethod
+    def _is_plan_hdf(path: Path) -> bool:
+        name = path.name.lower()
+        if name == "terrain.hdf":
+            return False
+        if ".g" in name and name.endswith(".hdf"):
+            return False
+        return ".p" in name and name.endswith(".hdf")
+
+    @staticmethod
+    def _fmt_station(value: object) -> str:
+        try:
+            f = float(value)
+        except Exception:
+            return str(value).strip()
+        if abs(f - round(f)) < 1e-6:
+            return str(int(round(f)))
+        return f"{f:.3f}"
 
     @staticmethod
     def _dismiss_ras_dialogs() -> int:
@@ -253,7 +440,9 @@ class HECRASControllerAdapter:
                 if not win32gui.IsWindowVisible(hwnd):
                     return True
                 title = win32gui.GetWindowText(hwnd).strip()
-                if title == "RAS":
+                cls = win32gui.GetClassName(hwnd).strip()
+                # Only close modal dialog popups; never close the main RAS frame.
+                if title == "RAS" and cls == "#32770":
                     win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
                     closed += 1
             except Exception:
@@ -269,11 +458,31 @@ class HECRASControllerAdapter:
     @staticmethod
     def _close_running_instances() -> None:
         subprocess.run(
-            ["powershell", "-NoProfile", "-Command", "Get-Process Ras -ErrorAction SilentlyContinue | Stop-Process -Force"],
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-Process Ras -ErrorAction SilentlyContinue | Stop-Process -Force",
+            ],
             capture_output=True,
             text=True,
             check=False,
         )
+
+    @staticmethod
+    def _pick_project_file(run_project_dir: Path) -> Path:
+        prjs = sorted(run_project_dir.glob("*.prj"), key=lambda p: (p.name.lower(), p.stat().st_size))
+        if not prjs:
+            raise HECControllerError(f"No .prj found in run project directory: {run_project_dir}")
+
+        non_empty = [p for p in prjs if p.stat().st_size > 0]
+        if not non_empty:
+            raise HECControllerError(
+                f"Only empty .prj files found in run project directory: {run_project_dir}"
+            )
+
+        preferred = [p for p in non_empty if p.name.lower() == "meerlustkloof.prj"]
+        return preferred[0] if preferred else non_empty[0]
 
     def _com_available(self, progid: str) -> bool:
         script = f"""
@@ -289,72 +498,17 @@ try {{
   }}
 }}
 """
-        out = self._run_ps_inline(script)
-        return "OK" in out
-
-    def _run_controller_script(self, payload: dict[str, object]) -> dict[str, str | bool]:
-        script = self._controller_script()
-        with tempfile.TemporaryDirectory() as td:
-            td_path = Path(td)
-            ps1 = td_path / "run_hecras.ps1"
-            in_json = td_path / "input.json"
-            out_json = td_path / "output.json"
-            ps1.write_text(script, encoding="utf-8")
-            in_json.write_text(json.dumps(payload), encoding="utf-8")
-
-            cmd = [
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(ps1),
-                "-InputJson",
-                str(in_json),
-                "-OutputJson",
-                str(out_json),
-            ]
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_sec,
-                check=False,
-            )
-            if proc.returncode != 0:
-                details = ""
-                if out_json.exists():
-                    try:
-                        payload = json.loads(out_json.read_text(encoding="utf-8"))
-                        details = f"\noutput.json:\n{json.dumps(payload, indent=2)}"
-                    except Exception:
-                        details = f"\noutput.json raw:\n{out_json.read_text(encoding='utf-8', errors='ignore')}"
-                raise HECControllerError(
-                    "HEC-RAS COM script failed.\n"
-                    f"stdout:\n{proc.stdout}\n"
-                    f"stderr:\n{proc.stderr}"
-                    f"{details}"
-                )
-            if not out_json.exists():
-                raise HECControllerError("HEC-RAS COM script did not produce output.json")
-            data = json.loads(out_json.read_text(encoding="utf-8"))
-            if not data.get("success", False):
-                raise HECControllerError(f"HEC-RAS COM automation failed: {data.get('error', 'unknown')}")
-            return data
-
-    @staticmethod
-    def _run_ps_inline(script: str) -> str:
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-Command", script],
             capture_output=True,
             text=True,
             check=False,
         )
-        return (proc.stdout or "") + (proc.stderr or "")
+        out = (proc.stdout or "") + (proc.stderr or "")
+        return "OK" in out
 
     @staticmethod
     def _controller_script() -> str:
-        # Note: run is guardrailed; if plan is invalid or compute cannot proceed, script returns success=false.
         return r"""
 param(
   [Parameter(Mandatory=$true)][string]$InputJson,
@@ -367,187 +521,88 @@ function Write-Result($obj) {
   $obj | ConvertTo-Json -Depth 8 | Set-Content -Path $OutputJson -Encoding utf8
 }
 
-Add-Type -TypeDefinition @"
-using System;
-using System.Text;
-using System.Runtime.InteropServices;
-public static class RasWin {
-  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
-  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr childAfter, string className, string windowTitle);
-  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-}
-"@ -ErrorAction SilentlyContinue
-
-function Dismiss-RasDialogs {
-  $script:__rasClicked = 0
-  $cb = [RasWin+EnumWindowsProc]{
-    param([IntPtr]$hWnd, [IntPtr]$lParam)
-    if (-not [RasWin]::IsWindowVisible($hWnd)) { return $true }
-    $sb = New-Object System.Text.StringBuilder 256
-    [void][RasWin]::GetWindowText($hWnd, $sb, $sb.Capacity)
-    if ($sb.ToString() -eq "RAS") {
-      $btn = [RasWin]::FindWindowEx($hWnd, [IntPtr]::Zero, "Button", $null)
-      if ($btn -ne [IntPtr]::Zero) {
-        # BM_CLICK
-        [void][RasWin]::SendMessage($btn, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
-        $script:__rasClicked++
-      }
-    }
-    return $true
-  }
-  [void][RasWin]::EnumWindows($cb, [IntPtr]::Zero)
-  return $script:__rasClicked
-}
-
 try {
   $payload = Get-Content -Path $InputJson -Raw | ConvertFrom-Json
-  Set-Location -Path $payload.run_project_dir
-  [System.Environment]::CurrentDirectory = [string]$payload.run_project_dir
+  Set-Location -Path $payload.run_dir
+  [System.Environment]::CurrentDirectory = [string]$payload.run_dir
+
   $obj = New-Object -ComObject $payload.progid
-  $messages = @()
-  Start-Sleep -Milliseconds 400
-  $dismissed = Dismiss-RasDialogs
-  if ($dismissed -gt 0) { $messages += ("Dismissed startup RAS dialogs: " + $dismissed) }
-
   try {
-    $obj.Project_Open($payload.project)
-    $messages += "Project_Open attempted"
+    $obj.Project_Open($payload.project_file)
     Start-Sleep -Milliseconds 400
-    $dismissed = Dismiss-RasDialogs
-    if ($dismissed -gt 0) { $messages += ("Dismissed post-open RAS dialogs: " + $dismissed) }
-    $curProject = ""
-    try { $curProject = $obj.CurrentProjectFile() } catch {}
-    if ([string]::IsNullOrWhiteSpace($curProject)) {
-      throw "Project_Open did not load a project (CurrentProjectFile empty). Check HEC-RAS startup dialogs/permissions."
+    $curProj = ""
+    try { $curProj = $obj.CurrentProjectFile() } catch {}
+    if ([string]::IsNullOrWhiteSpace($curProj)) {
+      throw "Project_Open did not load a project (CurrentProjectFile empty)."
     }
-    $messages += ("Project opened: " + $curProject)
 
-    # Ensure current plan exists; some shell projects open with empty current plan.
     $curPlan = ""
     try { $curPlan = $obj.CurrentPlanFile() } catch {}
     if ([string]::IsNullOrWhiteSpace($curPlan)) {
-      try {
-        $setPlan = $obj.Plan_SetCurrent("Plan 01")
-        $messages += ("Plan_SetCurrent(Plan 01): " + $setPlan)
-      } catch {
-        $messages += ("Plan_SetCurrent warning: " + $_.Exception.Message)
-      }
-      if (-not $setPlan) {
-        try {
-          $setPlan = $obj.Plan_SetCurrent("p01")
-          $messages += ("Plan_SetCurrent(p01): " + $setPlan)
-        } catch {
-          $messages += ("Plan_SetCurrent warning: " + $_.Exception.Message)
-        }
-      }
+      try { [void]$obj.Plan_SetCurrent("Plan 01") } catch {}
+      try { [void]$obj.Plan_SetCurrent("p01") } catch {}
       try { $curPlan = $obj.CurrentPlanFile() } catch {}
       if ([string]::IsNullOrWhiteSpace($curPlan) -and $payload.strict) {
-        throw "No current plan active after project open (expected Plan 01/p01)."
+        throw "No current plan active after project open."
       }
     }
 
-    # Import geometry from staged SDF.
-    $obj.Geometry_GISImport("SDF Import", $payload.sdf)
-    $messages += "Geometry_GISImport completed"
-    Start-Sleep -Milliseconds 300
-    $dismissed = Dismiss-RasDialogs
-    if ($dismissed -gt 0) { $messages += ("Dismissed post-import RAS dialogs: " + $dismissed) }
-    $obj.Project_Save()
-
-    # Re-check plan after import/save.
-    try { $curPlan = $obj.CurrentPlanFile() } catch {}
-    if ([string]::IsNullOrWhiteSpace($curPlan)) {
-      try {
-        $setPlan = $obj.Plan_SetCurrent("Plan 01")
-        $messages += ("Plan_SetCurrent(Plan 01) after import: " + $setPlan)
-      } catch {
-        $messages += ("Plan_SetCurrent warning after import: " + $_.Exception.Message)
+    $computeRaw = $obj.Compute_CurrentPlan(0, $null, $true)
+    $ok = $false
+    $nmsg = 0
+    $msgs = @()
+    $blocking = $true
+    if ($computeRaw -is [array]) {
+      if ($computeRaw.Length -ge 1) { $ok = [bool]$computeRaw[0] }
+      if ($computeRaw.Length -ge 2) { try { $nmsg = [int]$computeRaw[1] } catch {} }
+      if ($computeRaw.Length -ge 3 -and $computeRaw[2]) {
+        $msgs = @($computeRaw[2] | ForEach-Object { [string]$_ })
       }
-      if (-not $setPlan) {
-        try {
-          $setPlan = $obj.Plan_SetCurrent("p01")
-          $messages += ("Plan_SetCurrent(p01) after import: " + $setPlan)
-        } catch {
-          $messages += ("Plan_SetCurrent warning after import: " + $_.Exception.Message)
-        }
-      }
-      try { $curPlan = $obj.CurrentPlanFile() } catch {}
+      if ($computeRaw.Length -ge 4) { try { $blocking = [bool]$computeRaw[3] } catch {} }
+    } elseif ($computeRaw -is [bool]) {
+      $ok = $computeRaw
+    } else {
+      $ok = [bool]$computeRaw
     }
-    if ([string]::IsNullOrWhiteSpace($curPlan) -and $payload.strict) {
-      throw "No current plan active after project open/import (expected p01)."
-    }
-
-    # Try steady-flow setup (best effort; some projects may require pre-existing plan/profile definitions).
-    $flow = Get-Content -Path $payload.flow_json -Raw | ConvertFrom-Json
-    try {
-      $obj.SteadyFlow_ClearFlowData()
-      $qUp = New-Object 'System.Single[]' 1
-      $qUp[0] = [single]$flow.upstream_flow_cms
-      $qTr = New-Object 'System.Single[]' 1
-      $qTr[0] = [single]($flow.upstream_flow_cms + $flow.tributary_flow_cms)
-      $usStation = if ($flow.upstream_station_hint) { [string]$flow.upstream_station_hint } else { '3905' }
-      $trStation = if ($flow.tributary_station_hint) { [string]$flow.tributary_station_hint } else { '2405' }
-
-      # Station mapping assumes assignment convention (upstream station ~3905, confluence station ~2405).
-      $obj.SteadyFlow_SetFlow($payload.river_name, $payload.reach_name, $usStation, $qUp)
-      $obj.SteadyFlow_SetFlow($payload.river_name, $payload.reach_name, $trStation, $qTr)
-
-      $bc = New-Object 'System.Single[]' 1
-      $bc[0] = [single]$flow.downstream_normal_depth_slope
-      [void]$obj.SteadyFlow_FixedWSBoundary($payload.river_name, $payload.reach_name, $false, $bc)
-      $messages += "Steady flow and boundary attempted"
-    } catch {
-      $messages += ("Steady flow setup warning: " + $_.Exception.Message)
-      if ($payload.strict) { throw }
-    }
-
-    # Compute current plan.
-    [int]$nmsg = 0
-    $outMsgs = New-Object 'System.String[]' 500
-    try {
-      $ok = $obj.Compute_CurrentPlan([ref]$nmsg, $outMsgs, $true)
-      $messages += ("Compute_CurrentPlan returned: " + $ok)
-      if (-not $ok -and $payload.strict) {
-        throw "Compute_CurrentPlan returned false"
-      }
-    } catch {
-      throw ("Compute_CurrentPlan failed: " + $_.Exception.Message)
-    }
-
-    $currentPlan = $obj.CurrentPlanFile()
-    $currentGeom = $obj.CurrentGeomFile()
-    $currentSteady = $obj.CurrentSteadyFile()
 
     $obj.Project_Save()
-    $obj.Project_Close()
+    try { $obj.Project_Close() } catch {}
 
-    $runDir = $payload.run_project_dir
-    $plans = Get-ChildItem -Path $runDir -Filter '*.p??' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
-    $hdfs = Get-ChildItem -Path $runDir -Filter '*.hdf' -ErrorAction SilentlyContinue | `
-      Where-Object { $_.Name -match '\.p\d\d(\..+)?\.hdf$' -or $_.Name -match '\.p\d\d\.hdf$' -or $_.Name -match 'plan|results' } | `
-      Sort-Object LastWriteTime -Descending
-    $logs = Get-ChildItem -Path $runDir -Filter '*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+    $plans = Get-ChildItem -Path $payload.run_dir -Filter '*.p??' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+    $hdfs = Get-ChildItem -Path $payload.run_dir -Filter '*.hdf' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '\.p\d\d\.hdf$' } | Sort-Object LastWriteTime -Descending
+    $outs = Get-ChildItem -Path $payload.run_dir -Filter '*.o??' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+    $logs = Get-ChildItem -Path $payload.run_dir -Filter '*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
 
-    if ($payload.strict) {
-      if ($plans.Count -eq 0) { throw "No plan file (*.p##) found after compute." }
-      if ($hdfs.Count -eq 0) { throw "No plan-result HDF found after compute." }
+    if ($payload.strict -and (-not $ok)) {
+      throw "Compute did not complete successfully."
+    }
+    if ($payload.strict -and $plans.Count -eq 0) {
+      throw "No plan file (*.p##) found after compute."
+    }
+    if ($payload.strict -and $hdfs.Count -eq 0 -and $outs.Count -eq 0) {
+      throw "No result artifacts (*.p##.hdf or *.o##) found after compute."
     }
 
-    $result = [ordered]@{
+    $curPlanFile = ""
+    $curGeomFile = ""
+    $curSteadyFile = ""
+    try { $curPlanFile = $obj.CurrentPlanFile() } catch {}
+    try { $curGeomFile = $obj.CurrentGeomFile() } catch {}
+    try { $curSteadyFile = $obj.CurrentSteadyFile() } catch {}
+
+    Write-Result @{
       success = $true
-      messages = $messages
-      current_plan = $currentPlan
-      current_geom = $currentGeom
-      current_steady = $currentSteady
+      messages = @($msgs)
+      current_plan = $curPlanFile
+      current_geom = $curGeomFile
+      current_steady = $curSteadyFile
       compute_message_count = $nmsg
+      compute_blocking_mode = $blocking
       plan_files = @($plans | ForEach-Object { $_.FullName })
       hdf_files = @($hdfs | ForEach-Object { $_.FullName })
+      output_files = @($outs | ForEach-Object { $_.FullName })
       log_files = @($logs | ForEach-Object { $_.FullName })
     }
-    Write-Result $result
   }
   finally {
     if ($null -ne $obj) {
@@ -556,11 +611,13 @@ try {
   }
 }
 catch {
-  $fail = [ordered]@{
+  Write-Result @{
     success = $false
     error = $_.Exception.Message
+    where = $_.InvocationInfo.PositionMessage
+    stack = $_.ScriptStackTrace
   }
-  Write-Result $fail
   exit 1
 }
 """
+

@@ -10,6 +10,7 @@ def stage_inputs_from_source(
     config: ProjectConfig,
     source_dir: Path,
     overwrite: bool = True,
+    purge_missing: bool = False,
 ) -> dict[str, list[str]]:
     """
     Copy required raw inputs from a source folder (e.g. ref/) into configured paths.
@@ -21,6 +22,7 @@ def stage_inputs_from_source(
     copied: list[str] = []
     missing: list[str] = []
     skipped: list[str] = []
+    removed: list[str] = []
 
     expected = _expected_paths(config)
     for target in expected:
@@ -30,6 +32,8 @@ def stage_inputs_from_source(
         match = _find_by_name(source_dir, target.name)
         if match is None:
             missing.append(target.name)
+            if purge_missing:
+                removed.extend(_remove_target_if_exists(target))
             continue
 
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -45,7 +49,7 @@ def stage_inputs_from_source(
         if target.suffix.lower() == ".shp":
             copied.extend(_copy_shapefile_sidecars(match, target, overwrite))
 
-    return {"copied": copied, "missing": missing, "skipped": skipped}
+    return {"copied": copied, "missing": missing, "skipped": skipped, "removed": removed}
 
 
 def _expected_paths(config: ProjectConfig) -> list[Path | None]:
@@ -83,3 +87,24 @@ def _copy_shapefile_sidecars(source_shp: Path, target_shp: Path, overwrite: bool
         shutil.copy2(src, dst)
         copied.append(str(dst))
     return copied
+
+
+def _remove_target_if_exists(target: Path) -> list[str]:
+    removed: list[str] = []
+    try:
+        if target.exists():
+            target.unlink()
+            removed.append(str(target))
+    except Exception:
+        return removed
+
+    if target.suffix.lower() == ".shp":
+        for ext in (".dbf", ".shx", ".prj", ".cpg", ".qmd"):
+            side = target.with_suffix(ext)
+            try:
+                if side.exists():
+                    side.unlink()
+                    removed.append(str(side))
+            except Exception:
+                continue
+    return removed

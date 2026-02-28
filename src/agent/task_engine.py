@@ -4,12 +4,12 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from src.models import AgentDecision, ExecutionPlan
 
 
-ActionCallable = Callable[[dict[str, Any]], dict[str, Any] | None]
+ActionCallable = Callable[[dict[str, Any]], Optional[dict[str, Any]]]
 
 
 class TaskEngine:

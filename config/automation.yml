@@ -3,6 +3,7 @@ autopilot:
   strict_geometry: true
   strict_hydraulics: true
   max_retries: 1
+  require_source_files: true
   allow_fallback_xs_fill: true
   scenario2:
     enabled: true

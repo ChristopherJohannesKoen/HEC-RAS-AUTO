@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -29,7 +29,7 @@ class TaskNode(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
     preconditions: list[str] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)
-    retry_rule: str | None = None
+    retry_rule: Optional[str] = None
     terminal_on_fail: bool = True
 
 
@@ -48,7 +48,7 @@ class AgentDecision(BaseModel):
     decision_type: str
     rationale: str
     evidence_refs: list[str] = Field(default_factory=list)
-    model_response_id: str | None = None
+    model_response_id: Optional[str] = None
 
 
 class CitationRecord(BaseModel):
@@ -70,4 +70,4 @@ class SubmissionPackManifest(BaseModel):
     cad_paths: list[str] = Field(default_factory=list)
     qa_paths: list[str] = Field(default_factory=list)
     unresolved_verify_items: list[str] = Field(default_factory=list)
-    manifest_path: Path | None = None
+    manifest_path: Optional[Path] = None
