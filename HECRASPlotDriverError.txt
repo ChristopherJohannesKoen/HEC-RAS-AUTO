@@ -1,0 +1,24 @@
+Main Exception: 
+Failed to save settings: An error occurred loading a configuration file: Could not find a part of the path 'C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\2djq0pza.tmp'. (C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\user.config)
+Inner Exception: 
+An error occurred loading a configuration file: Could not find a part of the path 'C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\2djq0pza.tmp'. (C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\user.config)
+Inner Exception: 
+Could not find a part of the path 'C:\Users\cjkoe\AppData\Local\PlotDriver\RasPlotDriver.exe_Url_5j02ppsoqxx5clj4fca1mwldgt1qb421\1.0.0.0\2djq0pza.tmp'.
+
+Stack Trace: 
+   at System.Configuration.ClientSettingsStore.WriteSettings(String sectionName, Boolean isRoaming, IDictionary newSettings)
+   at System.Configuration.LocalFileSettingsProvider.SetPropertyValues(SettingsContext context, SettingsPropertyValueCollection values)
+   at System.Configuration.SettingsBase.SaveCore()
+   at System.Configuration.SettingsBase.Save()
+   at System.Configuration.ApplicationSettingsBase.Save()
+   at PlotWPF.ViewModels.PlotVM.XMLSave()
+   at PlotWPF.ViewModels.PlotVM.<get_WindowClosedCommand>b__107_0()
+   at PlotWPF.Windows.PlotWindow.Window_Closing(Object sender, CancelEventArgs e)
+   at System.Windows.Window.OnClosing(CancelEventArgs e)
+   at System.Windows.Window.WmClose()
+   at System.Windows.Window.WindowFilterMessage(IntPtr hwnd, Int32 msg, IntPtr wParam, IntPtr lParam, Boolean& handled)
+   at System.Windows.Interop.HwndSource.PublicHooksFilterMessage(IntPtr hwnd, Int32 msg, IntPtr wParam, IntPtr lParam, Boolean& handled)
+   at MS.Win32.HwndWrapper.WndProc(IntPtr hwnd, Int32 msg, IntPtr wParam, IntPtr lParam, Boolean& handled)
+   at MS.Win32.HwndSubclass.DispatcherCallbackOperation(Object o)
+   at System.Windows.Threading.ExceptionWrapper.InternalRealCall(Delegate callback, Object args, Int32 numArgs)
+   at System.Windows.Threading.ExceptionWrapper.TryCatchWhen(Object source, Delegate callback, Object args, Int32 numArgs, Delegate catchHandler)

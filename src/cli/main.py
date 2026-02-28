@@ -346,7 +346,7 @@ def run_hecras(
         help="Auto-close running Ras.exe processes before COM automation.",
     ),
 ) -> None:
-    """Run HEC-RAS compute headlessly through COM automation."""
+    """Run HEC-RAS compute headlessly (CLI-first, COM fallback)."""
     configure_logging()
     cfg = load_project_config(config)
     run_project_dir = Path("runs") / run_id / "ras_project"
@@ -362,6 +362,9 @@ def run_hecras(
             reach_name=cfg.project.reach_name,
             strict=strict,
             auto_close_instances=auto_close_instances,
+            ras_exe_path=cfg.hec_ras.ras_exe_path,
+            prefer_cli=True,
+            allow_com_fallback=False,
         )
     except HECControllerError as exc:
         raise RuntimeError(f"run-hecras failed: {exc}") from exc

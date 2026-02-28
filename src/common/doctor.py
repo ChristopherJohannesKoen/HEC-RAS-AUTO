@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 from src.models import ProjectConfig
+from src.ras.controller_adapter import HECRASControllerAdapter, HECControllerError
 
 
 def run_doctor_checks(config: ProjectConfig) -> dict[str, object]:
@@ -43,6 +44,10 @@ def run_doctor_checks(config: ProjectConfig) -> dict[str, object]:
 
     checks["shell_project_exists"] = config.hec_ras.shell_project_dir.exists()
     checks["shell_has_prj"] = any(config.hec_ras.shell_project_dir.glob("*.prj"))
+    try:
+        checks["ras_exe"] = str(HECRASControllerAdapter._resolve_ras_exe(config.hec_ras.ras_exe_path))
+    except HECControllerError:
+        checks["ras_exe"] = ""
 
     checks["com"] = {
         "RAS67.HECRASController": _com_available("RAS67.HECRASController"),
@@ -59,6 +64,7 @@ def summarize_doctor(checks: dict[str, object]) -> str:
     lines.append(f"- OpenAI key set: {checks.get('openai_key_set')}")
     lines.append(f"- Shell project exists: {checks.get('shell_project_exists')}")
     lines.append(f"- Shell has .prj: {checks.get('shell_has_prj')}")
+    lines.append(f"- Ras.exe: {checks.get('ras_exe') or 'NOT FOUND'}")
     lines.append(f"- Running Ras.exe count: {checks.get('ras_process_count')}")
     lines.append("")
     lines.append("## Dependencies")

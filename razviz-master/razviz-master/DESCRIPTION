@@ -1,0 +1,55 @@
+Package: razviz
+Type: Package
+Title: A package to visualize performance of HEC-RAS models
+Version: 0.0.4
+Date: 2020-06-28
+Authors@R: c(person("Michael", "Dougherty", role = c("aut", "cre"),
+                    email = "Michael.P.Dougherty@usace.army.mil"),
+             person("Leigh", "Allison", role = "ctb",
+                    email = "Leigh.A.Allison@usace.army.mil"),
+             person("David", "Tsai", role = "ctb",
+                    email = "Heng-Wei.Tsai@usace.army.mil"),
+             person("Daniel", "Smith", role = "ctb", 
+                    email = "Daniel.D.Smith@usace.army.mil")
+            )
+Author: Michael Dougherty [aut, cre]
+Maintainer: Michael Dougherty <Michael.P.Dougherty@usace.army.mil>
+Description: This package contains a set of standard graphing and summary table 
+    functions to help streamline the review and evaluation of HEC-RAS model 
+    results during calibration. The package currently contains functions for 
+    producing reports containing the following visualizations. Hydrographs - 
+    Compare modeled versus observed values for both water surface elevation and 
+    discharge by cross section and model scenario. Longitudinal Profile Graph - 
+    Compare water surface elevation by river mile for multiple model scenarios. 
+    Graphs can also contain additional annotations (i.e., gage locations, levee 
+    elevations, bridge elevations, river features, and high water marks) helpful 
+    for evaluating model results. Goodness of Fit Statistics Tables - A table 
+    of goodness of fit statistics (i.e., R^2, RMSE, MAE) between modeled versus 
+    observed values by cross section and model scenario.
+URL: https://github.com/mpdougherty/razviz
+BugReports: https://github.com/mpdougherty/razviz/issues
+License: file LICENSE
+Depends: R (>= 2.10)
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.1.1
+Suggests: 
+    testthat,
+    knitr,
+    rmarkdown,
+    devtools,
+    forcats
+Imports: 
+    dplyr,
+    ggplot2,
+    ggrepel,
+    grDevices,
+    grid,
+    gridExtra,
+    lubridate,
+    readr,
+    scales,
+    stringr,
+    tibble,
+    tidyr
+VignetteBuilder: knitr

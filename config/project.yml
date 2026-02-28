@@ -29,5 +29,5 @@ hydraulics:
 
 hec_ras:
   shell_project_dir: "shell/ras_project"
-  ras_exe_path: ""
+  ras_exe_path: null
   geometry_import_name: "RASImport.sdf"

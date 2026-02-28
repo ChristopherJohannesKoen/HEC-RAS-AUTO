@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -59,29 +61,144 @@ class HECRASControllerAdapter:
         strict: bool = True,
         auto_close_instances: bool = False,
         apply_flow_via_com: bool = False,
+        ras_exe_path: Path | None = None,
+        prefer_cli: bool = True,
+        allow_com_fallback: bool = False,
     ) -> dict[str, object]:
         # sdf_path is kept for interface compatibility; file-first mode does not
         # require geometry import at compute time.
         _ = sdf_path
 
-        progid = self.detect_progid()
         run_project_dir = run_project_dir.resolve()
         self.check_no_running_instances(auto_close=auto_close_instances)
         prj = self._pick_project_file(run_project_dir).resolve()
         if not flow_json.exists():
             raise HECControllerError(f"Missing steady flow payload: {flow_json}")
         flow_payload = json.loads(flow_json.read_text(encoding="utf-8"))
+        errors: list[str] = []
 
-        return self._run_controller_pywin32(
-            progid=progid,
-            run_dir=run_project_dir,
-            project_file=prj,
-            strict=strict,
-            flow_payload=flow_payload,
-            river_name=river_name,
-            reach_name=reach_name,
-            apply_flow_via_com=apply_flow_via_com,
-        )
+        if prefer_cli:
+            try:
+                ras_exe = self._resolve_ras_exe(ras_exe_path)
+                return self._run_compute_cli(
+                    ras_exe=ras_exe,
+                    run_dir=run_project_dir,
+                    project_file=prj,
+                    strict=strict,
+                )
+            except HECControllerError as exc:
+                errors.append(f"CLI compute failed: {exc}")
+                if not allow_com_fallback:
+                    raise HECControllerError(errors[-1]) from exc
+
+        try:
+            progid = self.detect_progid()
+            result = self._run_controller_pywin32(
+                progid=progid,
+                run_dir=run_project_dir,
+                project_file=prj,
+                strict=strict,
+                flow_payload=flow_payload,
+                river_name=river_name,
+                reach_name=reach_name,
+                apply_flow_via_com=apply_flow_via_com,
+            )
+            if errors:
+                existing = result.get("messages", [])
+                if not isinstance(existing, list):
+                    existing = [str(existing)]
+                result["messages"] = errors + [str(m) for m in existing]
+            return result
+        except Exception as exc:
+            if errors:
+                raise HECControllerError("; ".join(errors + [f"COM fallback failed: {exc}"])) from exc
+            raise
+
+    def _run_compute_cli(
+        self,
+        ras_exe: Path,
+        run_dir: Path,
+        project_file: Path,
+        strict: bool,
+    ) -> dict[str, object]:
+        self._clear_readonly(run_dir)
+        self._repair_plotdriver_state()
+        env = self._build_cli_env(run_dir)
+        project_abs = project_file.resolve()
+        test_dir = run_dir.parent / f"{run_dir.name} [Test]"
+        if test_dir.exists():
+            shutil.rmtree(test_dir, ignore_errors=True)
+
+        # Use HEC-RAS test batch mode for unattended compute. It clones to
+        # "<project_dir> [Test]" and exits on completion.
+        command_line = f'"{ras_exe}" "{project_abs}" -test -hideCompute'
+        try:
+            proc = subprocess.run(
+                command_line,
+                cwd=str(run_dir.parent),
+                env=env,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_sec,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self._close_running_instances()
+            raise HECControllerError(
+                f"Ras.exe test-batch compute timed out after {self.timeout_sec}s."
+            ) from exc
+        except Exception as exc:
+            raise HECControllerError(f"Failed to start Ras.exe test-batch compute: {exc}") from exc
+
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        source_dir = test_dir if test_dir.exists() else run_dir
+        source_artifacts = self._collect_output_files(source_dir)
+
+        # Copy generated test artifacts back into the run directory so downstream
+        # tooling can stay path-stable.
+        for pattern in ("*.p??.hdf", "*.p??.tmp.hdf", "*.g??.hdf", "*.o??", "*.computeMsgs.txt", "*.testing.txt"):
+            for file_path in source_dir.glob(pattern):
+                try:
+                    shutil.copy2(file_path, run_dir / file_path.name)
+                except Exception:
+                    pass
+        artifacts = self._collect_output_files(run_dir)
+        messages: list[str] = [
+            f"CLI command: {command_line}",
+            f"CLI return code: {proc.returncode}",
+            f"CLI test folder: {test_dir}",
+        ]
+        if stdout.strip():
+            messages.append(f"CLI stdout: {stdout.strip()[:4000]}")
+        if stderr.strip():
+            messages.append(f"CLI stderr: {stderr.strip()[:4000]}")
+        if source_dir == test_dir and not source_artifacts["hdf_files"] and not source_artifacts["output_files"]:
+            messages.append("CLI test mode produced no outputs in [Test] folder.")
+
+        success = bool(artifacts["hdf_files"] or artifacts["output_files"])
+        if strict and not success:
+            raise HECControllerError(
+                "CLI test-batch compute finished without result artifacts (*.p##.hdf or *.O##). "
+                "Check HEC-RAS popups/logs and HECRASPlotDriverError.txt."
+            )
+
+        return {
+            "success": success,
+            "messages": messages,
+            "current_plan": "",
+            "current_geom": "",
+            "current_steady": "",
+            "compute_message_count": 0,
+            "compute_blocking_mode": True,
+            "plan_files": artifacts["plan_files"],
+            "hdf_files": artifacts["hdf_files"],
+            "output_files": artifacts["output_files"],
+            "log_files": artifacts["log_files"],
+            "backend": "cli",
+            "ras_exe": str(ras_exe),
+        }
 
     def _run_controller_pywin32(
         self,
@@ -207,14 +324,11 @@ class HECRASControllerAdapter:
             except Exception:
                 pass
 
-            plans = sorted(run_dir.glob("*.p??"), key=lambda p: p.stat().st_mtime, reverse=True)
-            hdfs = sorted(
-                [p for p in run_dir.glob("*.hdf") if self._is_plan_hdf(p)],
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            outputs = sorted(run_dir.glob("*.o??"), key=lambda p: p.stat().st_mtime, reverse=True)
-            logs = sorted(run_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+            artifacts = self._collect_output_files(run_dir)
+            plans = artifacts["plan_files"]
+            hdfs = artifacts["hdf_files"]
+            outputs = artifacts["output_files"]
+            logs = artifacts["log_files"]
 
             if strict and not plans:
                 raise HECControllerError("No plan file (*.p##) found after compute.")
@@ -231,10 +345,11 @@ class HECRASControllerAdapter:
                 "current_steady": current_steady,
                 "compute_message_count": nmsg,
                 "compute_blocking_mode": bool(blocking_mode),
-                "plan_files": [str(p.resolve()) for p in plans],
-                "hdf_files": [str(p.resolve()) for p in hdfs],
-                "output_files": [str(p.resolve()) for p in outputs],
-                "log_files": [str(p.resolve()) for p in logs],
+                "plan_files": plans,
+                "hdf_files": hdfs,
+                "output_files": outputs,
+                "log_files": logs,
+                "backend": "com",
             }
         finally:
             try:
@@ -406,6 +521,110 @@ class HECRASControllerAdapter:
         return bool(raw), 0, [], True
 
     @staticmethod
+    def _resolve_ras_exe(ras_exe_path: Path | None) -> Path:
+        candidates: list[Path] = []
+        if ras_exe_path:
+            raw = str(ras_exe_path).strip().strip('"').strip("'")
+            if raw and raw not in {".", "./", ".\\"}:
+                candidates.append(Path(raw))
+        env_path = os.getenv("HEC_RAS_EXE")
+        if env_path:
+            candidates.append(Path(env_path))
+        candidates.extend(
+            [
+                Path(r"D:\Program Files\HEC\HEC-RAS\6.6\Ras.exe"),
+                Path(r"C:\Program Files\HEC\HEC-RAS\6.6\Ras.exe"),
+                Path(r"D:\Program Files\HEC\HEC-RAS\6.7\Ras.exe"),
+                Path(r"C:\Program Files\HEC\HEC-RAS\6.7\Ras.exe"),
+            ]
+        )
+        for candidate in candidates:
+            if (
+                candidate
+                and candidate.exists()
+                and candidate.is_file()
+                and candidate.name.lower() == "ras.exe"
+            ):
+                return candidate.resolve()
+        raise HECControllerError(
+            "Ras.exe not found. Set hec_ras.ras_exe_path in config/project.yml "
+            "or HEC_RAS_EXE environment variable."
+        )
+
+    @staticmethod
+    def _build_cli_env(run_dir: Path) -> dict[str, str]:
+        env = os.environ.copy()
+        runtime_root = run_dir / "_hec_runtime"
+        local_app = runtime_root / "LocalAppData"
+        roaming = runtime_root / "AppData"
+        temp_dir = runtime_root / "Temp"
+        for path in (local_app, roaming, temp_dir, local_app / "PlotDriver"):
+            path.mkdir(parents=True, exist_ok=True)
+        env["LOCALAPPDATA"] = str(local_app.resolve())
+        env["APPDATA"] = str(roaming.resolve())
+        env["TEMP"] = str(temp_dir.resolve())
+        env["TMP"] = str(temp_dir.resolve())
+        return env
+
+    @staticmethod
+    def _clear_readonly(run_dir: Path) -> None:
+        subprocess.run(
+            ["attrib", "-R", str(run_dir / "*"), "/S", "/D"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def _collect_output_files(self, run_dir: Path) -> dict[str, list[str]]:
+        plans = sorted(
+            [p for p in run_dir.iterdir() if re.search(r"\.p\d\d$", p.name.lower())],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        hdfs = sorted(
+            [p for p in run_dir.glob("*.hdf") if self._is_plan_hdf(p)],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        outputs = sorted(
+            [p for p in run_dir.iterdir() if re.search(r"\.o\d\d$", p.name.lower())],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        logs = sorted(run_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return {
+            "plan_files": [str(p.resolve()) for p in plans],
+            "hdf_files": [str(p.resolve()) for p in hdfs],
+            "output_files": [str(p.resolve()) for p in outputs],
+            "log_files": [str(p.resolve()) for p in logs],
+        }
+
+    @staticmethod
+    def _repair_plotdriver_state() -> None:
+        try:
+            root = Path.home() / "AppData" / "Local" / "PlotDriver"
+            root.mkdir(parents=True, exist_ok=True)
+            for candidate in root.glob("RasPlotDriver.exe_Url_*"):
+                try:
+                    (candidate / "1.0.0.0").mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+            error_log = Path("HECRASPlotDriverError.txt")
+            if error_log.exists():
+                text = error_log.read_text(encoding="utf-8", errors="ignore")
+                for match in re.findall(
+                    r"([A-Za-z]:\\Users\\[^\\]+\\AppData\\Local\\PlotDriver\\RasPlotDriver\.exe_Url_[^\\]+\\1\.0\.0\.0)",
+                    text,
+                ):
+                    try:
+                        Path(match).mkdir(parents=True, exist_ok=True)
+                    except Exception:
+                        pass
+        except Exception:
+            # PlotDriver repairs are best-effort only.
+            pass
+
+    @staticmethod
     def _is_plan_hdf(path: Path) -> bool:
         name = path.name.lower()
         if name == "terrain.hdf":
@@ -425,7 +644,7 @@ class HECRASControllerAdapter:
         return f"{f:.3f}"
 
     @staticmethod
-    def _dismiss_ras_dialogs() -> int:
+    def _dismiss_ras_dialogs(aggressive: bool = False) -> int:
         try:
             import win32con  # type: ignore[import-not-found]
             import win32gui  # type: ignore[import-not-found]
@@ -442,7 +661,10 @@ class HECRASControllerAdapter:
                 title = win32gui.GetWindowText(hwnd).strip()
                 cls = win32gui.GetClassName(hwnd).strip()
                 # Only close modal dialog popups; never close the main RAS frame.
-                if title == "RAS" and cls == "#32770":
+                should_close = title == "RAS"
+                if aggressive and title in {"Error", "Restart Plot Process?"}:
+                    should_close = True
+                if should_close and cls == "#32770":
                     win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
                     closed += 1
             except Exception:
