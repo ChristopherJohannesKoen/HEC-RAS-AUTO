@@ -1,0 +1,97 @@
+Build the Meerlustkloof HEC-RAS project from the files in ref.
+
+Produce Part A baseline outputs:
+- reach lengths table
+- steady input table
+- cross sections at chainage 0, 1500, 3905 with water and energy levels
+- longitudinal profile
+- energy-based floodline outputs
+- depth and velocity maps
+- hydraulic analysis of max WSE and velocity and confluence effect and risk notes
+
+Then run Part B Scenario 2 Climate Intensification and output:
+- baseline vs scenario overlayed profile
+- comparison table for max WSE
+- comparison table for max velocity
+- flood extent change
+- mechanism explanation with citations where available
+
+Given files:
+- A contour map of the relevant river reach, both in pdf and AutoCAD formats ("Meerlustkloof Contours.pdf" and "Meerlustkloof Contours.dwg")
+- KMZ files indicating locations:
+  - Chainage 3905m: "Station 0 (Chainage 3905m).kmz"
+  - Chainage 0m:
+    - Right bank flood plain: "Chainage 0m (Station 3905m) Right Bank Floodplain.kmz"
+    - Top of the right bank: "Chainage 0m (Station 3905m) Right Bank Top.kmz"
+- Excel spreadsheet ("Meerlustkloof Info.xlsx") containing:
+  - Cross-sections at 500 m intervals
+  - River centre-line coordinates
+- Projection file and shapefile, and GeoTiff terrain file:
+  - "Meerlustkloof_Projection.prj"
+  - "Meerlustkloof_Projection.shp"
+  - "Meerlustkloof_Geo.tif"
+
+PART A - BASELINE MODEL
+
+1) Cross-Section Completion
+- At Chainage 0m (Station 3905m), no contour information is provided between the right bank floodplain and the top of the right bank.
+- Extend the cross section provided in "Meerlustkloof Info.xlsx" by:
+  - Importing the KMZ files into Cape Farm Mapper (https://gis.elsenburg.com/apps/cfm/)
+  - Measuring the ground elevation profile between the two points (distance approximately 90 m)
+  - Using available hints for KMZ import and elevation profile creation
+
+2) HEC-RAS Model Set-Up
+- Set up a HEC-RAS model from chainage 0 m to chainage 3905 m (station 3905m to station 0m).
+- Use RAS-Mapper to import projection and GeoTiff and define the river reach.
+- Use Manning n:
+  - main channel = 0.04
+  - floodplain = 0.06
+- Upstream boundary condition:
+  - Meerlustkloof 100-year flood peak = 375 m3/s
+  - normal flow slope S0 = 0.0215
+- Elandskloof joins at chainage 1500 (station 2405m):
+  - include flow change location
+  - add tributary discharge = 550 m3/s
+- Downstream boundary condition:
+  - normal flow slope S0 = 0.00725
+- Select proper flow regime (supercritical, subcritical, or mixed) and justify in report.
+
+Include in report:
+- downstream reach lengths table for each station
+- all steady flow input values
+- GIS map from RAS-Mapper showing terrain, river reach, and cross section locations
+
+3) Baseline Floodline Determination
+- Predict 1:100-year flood lines using HEC-RAS results.
+- Plot floodlines on the AutoCAD contour drawing.
+- Floodlines must be based on energy levels, not water levels.
+
+Include in report:
+- cross sections at chainage 0m, 1500m, 3905m (stations 3905m, 2405m, 0m) with 1:100-year water and energy levels
+- longitudinal profile with 1:100-year water and energy levels
+- AutoCAD images showing floodlines, cross sections, and contours
+- RAS Mapper depth and velocity plots for 1:100-year flood peak
+
+4) Baseline Hydraulic Behaviour Analysis
+- Analyze and quantify:
+  - maximum water surface elevation and location
+  - maximum velocity and location
+  - hydraulic effect of Elandskloof confluence
+  - land use types/infrastructure at risk
+- Discussion must include quantified values and hydraulic reasoning.
+
+PART B - SCENARIO-BASED SYSTEM ANALYSIS
+
+For Scenario 2 - Climate Intensification:
+- Interpret physical implications.
+- Decide model modifications (which parameters, by how much, and why).
+- Justify assumptions with relevant published work where possible.
+- Re-run and compare against baseline (steady 1D HEC-RAS framework).
+
+Required scenario outputs:
+- overlayed longitudinal profiles (baseline vs scenario)
+- comparison table:
+  - maximum water surface elevation
+  - maximum velocity
+  - change in flood extent
+- explanation of hydraulic mechanisms driving change

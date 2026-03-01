@@ -31,7 +31,7 @@ def build_ai_word_report(
 
     md_text = _sections_to_markdown(title, sections)
     md_path.write_text(md_text, encoding="utf-8")
-    _write_docx(title=title, sections=sections, out_path=docx_path)
+    written_docx_path = _write_docx(title=title, sections=sections, out_path=docx_path)
 
     debug_payload = {
         "run_id": run_id,
@@ -39,12 +39,14 @@ def build_ai_word_report(
         "section_count": len(sections),
         "ai_enabled": bool(ai_result.get("ai_enabled", False)),
         "response_id": ai_result.get("response_id"),
+        "docx_path": str(written_docx_path),
+        "docx_fallback_used": str(written_docx_path) != str(docx_path),
     }
     debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
 
     return {
         "markdown": str(md_path),
-        "docx": str(docx_path),
+        "docx": str(written_docx_path),
         "debug": str(debug_path),
     }
 
@@ -180,7 +182,7 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
-def _write_docx(title: str, sections: list[dict], out_path: Path) -> None:
+def _write_docx(title: str, sections: list[dict], out_path: Path) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     created = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     doc_xml = _build_document_xml(title=title, sections=sections)
@@ -216,7 +218,50 @@ def _write_docx(title: str, sections: list[dict], out_path: Path) -> None:
   <Application>HEC-RAS-AUTO</Application>
 </Properties>"""
 
-    with ZipFile(out_path, "w", compression=ZIP_DEFLATED) as zf:
+    try:
+        _write_docx_zip(
+            path=out_path,
+            content_types=content_types,
+            rels=rels,
+            core_xml=core_xml,
+            app_xml=app_xml,
+            doc_xml=doc_xml,
+        )
+        return out_path
+    except PermissionError:
+        # If the target DOCX is open/locked (e.g., in Word), write to a unique
+        # fallback file so the run can complete and surface the final report.
+        fallback = _next_available_docx_path(out_path)
+        _write_docx_zip(
+            path=fallback,
+            content_types=content_types,
+            rels=rels,
+            core_xml=core_xml,
+            app_xml=app_xml,
+            doc_xml=doc_xml,
+        )
+        return fallback
+
+
+def _next_available_docx_path(base_path: Path) -> Path:
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    candidate = base_path.with_name(f"{base_path.stem}_{ts}{base_path.suffix}")
+    idx = 1
+    while candidate.exists():
+        candidate = base_path.with_name(f"{base_path.stem}_{ts}_{idx}{base_path.suffix}")
+        idx += 1
+    return candidate
+
+
+def _write_docx_zip(
+    path: Path,
+    content_types: str,
+    rels: str,
+    core_xml: str,
+    app_xml: str,
+    doc_xml: str,
+) -> None:
+    with ZipFile(path, "w", compression=ZIP_DEFLATED) as zf:
         zf.writestr("[Content_Types].xml", content_types)
         zf.writestr("_rels/.rels", rels)
         zf.writestr("docProps/core.xml", core_xml)

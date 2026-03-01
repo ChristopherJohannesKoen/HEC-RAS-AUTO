@@ -59,17 +59,28 @@ def _collect_comparison_artifacts(base_run_id: str, scenario_run_id: str, output
 
 
 def _collect_reports(base_run_id: str, scenario_run_id: str, output_root: Path) -> list[str]:
-    out = []
-    for p in [
-        output_root / "reports" / f"{base_run_id}_report_draft.md",
-        output_root / "reports" / f"{base_run_id}_final_ai_report.md",
-        output_root / "reports" / f"{base_run_id}_final_ai_report.docx",
-        output_root / "reports" / f"{scenario_run_id}_report_draft.md",
-        output_root / "reports" / f"{scenario_run_id}_final_ai_report.md",
-        output_root / "reports" / f"{scenario_run_id}_final_ai_report.docx",
-    ]:
+    out: list[str] = []
+    reports_dir = output_root / "reports"
+    exact = [
+        reports_dir / f"{base_run_id}_report_draft.md",
+        reports_dir / f"{base_run_id}_final_ai_report.md",
+        reports_dir / f"{base_run_id}_final_ai_report.docx",
+        reports_dir / f"{scenario_run_id}_report_draft.md",
+        reports_dir / f"{scenario_run_id}_final_ai_report.md",
+        reports_dir / f"{scenario_run_id}_final_ai_report.docx",
+    ]
+    for p in exact:
         if p.exists():
             out.append(str(p))
+
+    # Include fallback DOCX names (e.g. when default file is locked and writer
+    # emits <run>_final_ai_report_YYYYmmdd_HHMMSS.docx).
+    for run_id in [base_run_id, scenario_run_id]:
+        pattern = f"{run_id}_final_ai_report_*.docx"
+        for p in sorted(reports_dir.glob(pattern)):
+            sp = str(p)
+            if sp not in out:
+                out.append(sp)
     return out
 
 

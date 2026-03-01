@@ -19,3 +19,13 @@ outputs/*
 
 logs/*
 !logs/.gitkeep
+
+# local archive for pre-public cleanup (not part of release package)
+archive/
+
+# local build/runtime artifacts
+*.egg-info/
+pytest-cache-files-*/
+HECRASPlotDriverError.txt
+tmp_hec32_test.ps1
+tmp_hec_test.vbs

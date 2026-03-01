@@ -1,83 +1,107 @@
 # HEC-RAS-AUTO
 
-Deterministic, fixture-first automation pipeline for HEC-RAS baseline + Scenario 2 workflows.
+Deterministic automation for Meerlustkloof 1D steady HEC-RAS workflows:
+- baseline model build/compute/report
+- scenario re-run and comparison
+- prompt-driven orchestration with optional OpenAI support
 
-## What This Implements
-- Intake validation for KMZ/XLSX/SHP/PRJ/GeoTIFF.
-- Chainage 0 cross-section completion from terrain sampling.
-- Geometry packaging and `RASImport.sdf` generation.
-- Baseline + Scenario 2 (climate intensification) run preparation.
-- COM-driven unattended HEC-RAS compute (`RAS67`/`RAS66` auto-detect).
-- Post-run discovery, analytics, QA reports, CAD DXF export, and draft Markdown report.
-- Guardrailed `autopilot` mode with OpenAI-assisted anomaly triage (optional).
+## Platform Requirements
 
-## Quick Start
+- Windows 10/11
+- Python 3.11+
+- HEC-RAS 6.6 or 6.7 installed (`Ras.exe`)
+- PowerShell
+
+## Repository Layout (Runtime-Critical)
+
+- `src/` application code
+- `config/` run and parsing configuration
+- `shell/ras_project/` HEC-RAS shell project template
+- `ref/` source input package used by `--source ref`
+- `data/raw/meerlustkloof/` runtime intake target (auto-populated from `ref` by agent/autopilot)
+- `templates/` report templates
+
+Everything not required for runtime has been moved under `archive/` for cleanup.
+
+## Setup
+
 ```powershell
 python -m venv .venv
 . .\.venv\Scripts\Activate.ps1
 pip install -e .[dev]
 ras-auto init
-ras-auto ingest --config config/project.yml
-ras-auto complete-xs --chainage 0 --run-id baseline
-ras-auto build-geometry --run-id baseline
-ras-auto prepare-run --run-id baseline
 ```
 
-Then perform the manual HEC-RAS compute gate (optional path) using instructions in:
-`runs/baseline/ras_project/MANUAL_COMPUTE_STEPS.txt`
+## Run the Full Meerlustkloof Example
 
-Resume:
+Use the bundled script (recommended):
+
 ```powershell
-ras-auto import-results --run-id baseline
-ras-auto analyze --run-id baseline
-ras-auto apply-scenario --scenario config/scenarios/scenario_2_climate.yml --run-id scenario_2
-ras-auto prepare-run --run-id scenario_2
+$env:OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
+.\scripts\run_prompt_live_run_example.ps1
+Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
 ```
 
-Repeat manual compute gate for scenario 2, then:
+The script reads the full assignment prompt from:
+- `prompts/meerlustkloof_assignment_prompt.txt`
+
+And runs:
+- `ras-auto agent-run` for baseline + assigned scenario
+- `ras-auto build-report --write-word-doc` for baseline
+- `ras-auto build-report --write-word-doc` for scenario
+
+## Equivalent Manual Commands
+
 ```powershell
-ras-auto import-results --run-id scenario_2
-ras-auto analyze --run-id scenario_2
-ras-auto compare --base baseline --other scenario_2
-ras-auto build-report --run-id baseline
-ras-auto build-report --run-id scenario_2
+$env:OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
+$prompt = Get-Content .\prompts\meerlustkloof_assignment_prompt.txt -Raw
+
+ras-auto agent-run `
+  --prompt "$prompt" `
+  --source ref `
+  --run-id prompt_live_run `
+  --assigned-scenario scenario_2 `
+  --strict `
+  --config config/project.yml `
+  --sheets config/sheets.yml `
+  --thresholds config/thresholds.yml `
+  --automation config/automation.yml `
+  --ai config/ai.yml `
+  --agent-config config/agent.yml `
+  --retrieval config/retrieval.yml
+
+ras-auto build-report --run-id prompt_live_run --ai config/ai.yml --write-word-doc
+ras-auto build-report --run-id prompt_live_run_scenario_2 --ai config/ai.yml --write-word-doc
+
+Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
 ```
 
-## Unattended v2 Mode
-```powershell
-setx OPENAI_API_KEY "<your_key>"   # optional, for AI triage text
-ras-auto doctor --config config/project.yml
-ras-auto autopilot --source ref --run-id baseline --scenario2
-```
+## Outputs
 
-Additional automation command:
-```powershell
-ras-auto run-hecras --run-id baseline --strict
-```
+Baseline run outputs:
+- `outputs/prompt_live_run/`
+- `outputs/reports/prompt_live_run_report_draft.md`
+- `outputs/reports/prompt_live_run_final_ai_report.md`
+- `outputs/reports/prompt_live_run_final_ai_report.docx`
 
-Optional Scenario 2 sensitivity sweep:
-```powershell
-ras-auto autopilot --source ref --run-id baseline --scenario2 --sweep 1.10,1.15,1.20
-```
+Scenario outputs:
+- `outputs/prompt_live_run_scenario_2/`
+- `outputs/reports/prompt_live_run_scenario_2_report_draft.md`
+- `outputs/reports/prompt_live_run_scenario_2_final_ai_report.md`
+- `outputs/reports/prompt_live_run_scenario_2_final_ai_report.docx`
 
-## Prompt-Driven Agent v3
-Compile plan only:
-```powershell
-ras-auto agent-plan --prompt "Build baseline and scenario analysis from the provided Meerlustkloof files" --source ref --run-id baseline
-```
+Submission bundle:
+- `outputs/prompt_live_run/submission/manifest.json`
 
-Run end-to-end prompt workflow:
-```powershell
-ras-auto agent-run --prompt "Given the assignment brief, complete baseline + Scenario 2 with citations and submission pack" --source ref --run-id baseline --assigned-scenario scenario_2 --strict
-```
+## Troubleshooting
 
-Resume and explain:
-```powershell
-ras-auto agent-resume --run-id baseline
-ras-auto agent-explain --run-id baseline
-```
+- If `agent-run` fails due file locks in `runs/<run_id>/ras_project`, close HEC-RAS and retry:
+  - `ras-auto agent-resume --run-id <run_id> --strict`
+- If no AI report is produced, confirm `OPENAI_API_KEY` is set in the current shell.
+- If `Ras.exe` path is not discovered, set `HEC_RAS_EXE` or edit `config/project.yml`.
 
-## Notes
-- Real project files can be added later under `data/raw/`.
-- Fixtures are used to develop the pipeline contract before full data arrives.
-- CAD UI automation is not required; DXF + GIS exports are generated automatically.
+## Security
+
+- Never commit real API keys.
+- Use environment variables only:
+  - `$env:OPENAI_API_KEY = "..."` for current shell session
