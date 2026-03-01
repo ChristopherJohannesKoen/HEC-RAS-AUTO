@@ -100,6 +100,12 @@ def ingest(config: Path = typer.Option(Path("config/project.yml")), sheets: Path
     )
     write_reference_points(points)
     parse_excel_inputs(cfg.files.info_xlsx, sheets_cfg)
+    _write_centerline_geojson_from_excel(
+        csv_path=Path("data/processed/centerline_from_excel.csv"),
+        out_path=Path("data/processed/centerline_from_excel.geojson"),
+        terrain_tif=cfg.files.terrain_tif,
+        debug_out=Path("data/processed/centerline_transform_debug.json"),
+    )
     parse_centerline_shapefile(cfg.files.centerline_shp, cfg.project.target_crs_epsg)
     typer.echo(f"Ingest complete. Manifest: data/processed/project_manifest.json ({len(manifest.files)} files)")
 
@@ -138,7 +144,7 @@ def build_geometry(
     xs_source = _prepare_xs_geometry_input()
 
     sections_json = build_cross_sections(
-        centerline_geojson=Path("data/processed/centerline_from_shp.geojson"),
+        centerline_geojson=_resolve_centerline_geojson(),
         xs_csv=xs_source,
         river_name=cfg.project.river_name,
         reach_name=cfg.project.reach_name,
@@ -159,7 +165,7 @@ def build_geometry(
 
     qa_issues = run_geometry_qa(
         sections_json,
-        Path("data/processed/centerline_from_shp.geojson"),
+        _resolve_centerline_geojson(),
         min_sections=th.qa.min_cross_sections,
     )
     qa_dir = Path("outputs") / run_id / "qa"
@@ -198,7 +204,7 @@ def prepare_run(
     staged_text = stage_text_model_files(
         run_project_dir=run_project_dir,
         sections_json=sections_json,
-        centerline_geojson=Path("data/processed/centerline_from_shp.geojson"),
+        centerline_geojson=_resolve_centerline_geojson(),
         flow_json=flow_json,
         river_name=cfg.project.river_name,
         reach_name=cfg.project.reach_name,
@@ -468,7 +474,7 @@ def autopilot(
             run_id=run_id,
             config=config,
             strict=strict,
-            auto_close_instances=not strict,
+            auto_close_instances=True,
         )
         return "ok"
 
@@ -791,6 +797,129 @@ def _issues_to_markdown(title: str, issues) -> str:
     for i in issues:
         lines.append(f"- [{i.severity.upper()}] `{i.code}`: {i.message}")
     return "\n".join(lines) + "\n"
+
+
+def _write_centerline_geojson_from_excel(
+    csv_path: Path,
+    out_path: Path,
+    terrain_tif: Path | None = None,
+    debug_out: Path | None = None,
+) -> Path:
+    import pandas as pd
+    import rasterio
+
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Missing Excel-derived centerline CSV: {csv_path}")
+
+    df = pd.read_csv(csv_path)
+    if "x" not in df.columns or "y" not in df.columns:
+        raise ValueError(f"Centerline CSV missing x/y columns: {csv_path}")
+    df["x"] = pd.to_numeric(df["x"], errors="coerce")
+    df["y"] = pd.to_numeric(df["y"], errors="coerce")
+    df = df.dropna(subset=["x", "y"]).reset_index(drop=True)
+    if len(df) < 2:
+        raise ValueError(f"Centerline CSV has fewer than 2 valid points: {csv_path}")
+    if "chainage_m" in df.columns:
+        df["chainage_m"] = pd.to_numeric(df["chainage_m"], errors="coerce")
+        if df["chainage_m"].notna().any():
+            df = df.sort_values("chainage_m").reset_index(drop=True)
+
+    debug_payload: dict[str, object] = {
+        "source_csv": str(csv_path),
+        "terrain_tif": str(terrain_tif) if terrain_tif else "",
+        "transform_applied": False,
+    }
+    if terrain_tif and terrain_tif.exists():
+        with rasterio.open(terrain_tif) as ds:
+            bounds = ds.bounds
+        tx_min, tx_max = float(bounds.left), float(bounds.right)
+        ty_min, ty_max = float(bounds.bottom), float(bounds.top)
+
+        raw_inside = (
+            (
+                (df["x"] >= tx_min)
+                & (df["x"] <= tx_max)
+                & (df["y"] >= ty_min)
+                & (df["y"] <= ty_max)
+            ).sum()
+            / max(len(df), 1)
+        )
+
+        ex_min, ex_max = float(df["x"].min()), float(df["x"].max())
+        ey_min, ey_max = float(df["y"].min()), float(df["y"].max())
+        dx = ((tx_min + tx_max) / 2.0) - ((ex_min + ex_max) / 2.0)
+        dy = ((ty_min + ty_max) / 2.0) - ((ey_min + ey_max) / 2.0)
+
+        shifted = df.copy()
+        shifted["x"] = shifted["x"] + dx
+        shifted["y"] = shifted["y"] + dy
+        shifted_inside = (
+            (
+                (shifted["x"] >= tx_min)
+                & (shifted["x"] <= tx_max)
+                & (shifted["y"] >= ty_min)
+                & (shifted["y"] <= ty_max)
+            ).sum()
+            / max(len(shifted), 1)
+        )
+
+        debug_payload.update(
+            {
+                "terrain_bounds": {"xmin": tx_min, "xmax": tx_max, "ymin": ty_min, "ymax": ty_max},
+                "excel_bounds_raw": {"xmin": ex_min, "xmax": ex_max, "ymin": ey_min, "ymax": ey_max},
+                "inside_ratio_raw": float(raw_inside),
+                "inside_ratio_shifted": float(shifted_inside),
+                "centroid_shift_dx": float(dx),
+                "centroid_shift_dy": float(dy),
+            }
+        )
+
+        # If Excel centerline appears in a different local frame, translate it
+        # into the terrain frame by centroid shift.
+        if raw_inside < 0.5 and shifted_inside >= 0.8 and shifted_inside > raw_inside + 0.2:
+            df = shifted
+            debug_payload["transform_applied"] = True
+            debug_payload["transform_kind"] = "centroid_translation_to_terrain_bounds"
+        else:
+            debug_payload["transform_kind"] = "none"
+    else:
+        debug_payload["transform_kind"] = "none_no_terrain"
+
+    coords = [[float(row.x), float(row.y)] for row in df.itertuples(index=False)]
+    payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {
+                    "id": 1,
+                    "source": "excel_centerline",
+                    "transform_applied": bool(debug_payload.get("transform_applied", False)),
+                    "transform_kind": str(debug_payload.get("transform_kind", "none")),
+                },
+                "geometry": {"type": "LineString", "coordinates": coords},
+            }
+        ],
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    if debug_out is not None:
+        debug_out.parent.mkdir(parents=True, exist_ok=True)
+        debug_out.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
+    return out_path
+
+
+def _resolve_centerline_geojson() -> Path:
+    excel_geojson = Path("data/processed/centerline_from_excel.geojson")
+    shp_geojson = Path("data/processed/centerline_from_shp.geojson")
+    if excel_geojson.exists():
+        return excel_geojson
+    if shp_geojson.exists():
+        return shp_geojson
+    raise FileNotFoundError(
+        "No processed centerline GeoJSON found. Expected "
+        "data/processed/centerline_from_excel.geojson or centerline_from_shp.geojson."
+    )
 
 
 def _prepare_xs_geometry_input() -> Path:

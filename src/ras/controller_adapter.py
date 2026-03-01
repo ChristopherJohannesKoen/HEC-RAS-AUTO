@@ -127,7 +127,8 @@ class HECRASControllerAdapter:
     ) -> dict[str, object]:
         self._close_running_instances()
         self._prepare_run_workspace(run_dir)
-        self._ensure_plotdriver_writable()
+        runtime_localapp = run_dir / "_hec_runtime" / "LocalAppData"
+        self._ensure_plotdriver_writable(preferred_root=runtime_localapp / "PlotDriver")
         popup_log = run_dir / "popup_events.jsonl"
         try:
             popup_log.unlink(missing_ok=True)
@@ -1040,25 +1041,37 @@ class HECRASControllerAdapter:
                     continue
         return max(mtimes) if mtimes else 0.0
 
-    def _ensure_plotdriver_writable(self) -> None:
-        root = Path.home() / "AppData" / "Local" / "PlotDriver"
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            raise HECControllerError(
-                f"PlotDriver cache path is not accessible: {root} ({exc})."
-            ) from exc
+    def _ensure_plotdriver_writable(self, preferred_root: Path | None = None) -> Path:
+        # Prefer run-scoped PlotDriver cache so runs do not depend on
+        # potentially broken user-profile PlotDriver state.
+        roots: list[Path] = []
+        if preferred_root is not None:
+            roots.append(preferred_root)
+        roots.append(Path.home() / "AppData" / "Local" / "PlotDriver")
 
-        probe = root / "codex_plotdriver_write_probe.tmp"
-        try:
-            probe.write_text("probe", encoding="ascii")
-            probe.unlink(missing_ok=True)
-        except Exception as exc:
-            raise HECControllerError(
-                "PlotDriver cache path is not writable. "
-                f"HEC-RAS cannot run unattended because it must write under '{root}'. "
-                "Close all HEC-RAS/RasPlotDriver processes and verify local profile write permissions."
-            ) from exc
+        last_exc: Exception | None = None
+        for root in roots:
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+                probe = root / f"codex_plotdriver_write_probe_{int(time.time() * 1000)}.tmp"
+                probe.write_text("probe", encoding="ascii")
+                try:
+                    probe.unlink(missing_ok=True)
+                except Exception:
+                    # Delete is best-effort only; successful write is enough
+                    # to prove the cache path is writable for runtime use.
+                    pass
+                return root
+            except Exception as exc:
+                last_exc = exc
+                continue
+
+        target = roots[0] if roots else (Path.home() / "AppData" / "Local" / "PlotDriver")
+        raise HECControllerError(
+            "PlotDriver cache path is not writable. "
+            f"HEC-RAS cannot run unattended because it must write under '{target}'. "
+            "Close all HEC-RAS/RasPlotDriver processes and verify local profile write permissions."
+        ) from last_exc
 
     @staticmethod
     def _repair_plotdriver_state() -> None:

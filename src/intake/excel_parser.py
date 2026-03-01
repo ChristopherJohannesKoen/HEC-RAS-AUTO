@@ -109,16 +109,50 @@ def _parse_assignment_style_workbook(
         raise ValueError("Could not parse any cross-section rows from assignment workbook format.")
 
     long_raw = pd.read_excel(xlsx_path, sheet_name=centerline_sheet, header=None)
-    x_col, y_col = _find_centerline_xy_columns(long_raw)
-    centerline_df = long_raw.iloc[2:, [x_col, y_col]].copy()
-    centerline_df.columns = ["x", "y"]
-    centerline_df["x"] = pd.to_numeric(centerline_df["x"], errors="coerce")
-    centerline_df["y"] = pd.to_numeric(centerline_df["y"], errors="coerce")
-    centerline_df = centerline_df.dropna(subset=["x", "y"]).reset_index(drop=True)
+    centerline_df = _parse_river_centreline_block(long_raw)
     if centerline_df.empty:
         raise ValueError("Could not parse river centerline x/y rows from workbook.")
 
     return xs_df, centerline_df
+
+
+def _parse_river_centreline_block(df: pd.DataFrame) -> pd.DataFrame:
+    # Prefer explicit "River Centreline" block layout from the assignment sheet:
+    # row 0: merged heading "River Centreline"
+    # row 1: X, Y, River Name, Chainage, Ground Level
+    row0 = df.iloc[0].astype(str).tolist() if len(df) > 0 else []
+    rc_idx = next((i for i, v in enumerate(row0) if "river centreline" in str(v).lower()), None)
+
+    if rc_idx is not None and len(df) > 2:
+        cols: list[int] = [rc_idx, rc_idx + 1]
+        names: list[str] = ["x", "y"]
+        if rc_idx + 2 < df.shape[1]:
+            cols.append(rc_idx + 2)
+            names.append("river_name")
+        if rc_idx + 3 < df.shape[1]:
+            cols.append(rc_idx + 3)
+            names.append("chainage_m")
+        if rc_idx + 4 < df.shape[1]:
+            cols.append(rc_idx + 4)
+            names.append("ground_level_m")
+
+        out = df.iloc[2:, cols].copy()
+        out.columns = names
+        out["x"] = pd.to_numeric(out["x"], errors="coerce")
+        out["y"] = pd.to_numeric(out["y"], errors="coerce")
+        if "chainage_m" in out.columns:
+            out["chainage_m"] = pd.to_numeric(out["chainage_m"], errors="coerce")
+        if "ground_level_m" in out.columns:
+            out["ground_level_m"] = pd.to_numeric(out["ground_level_m"], errors="coerce")
+        out = out.dropna(subset=["x", "y"]).reset_index(drop=True)
+        return out
+
+    x_col, y_col = _find_centerline_xy_columns(df)
+    out = df.iloc[2:, [x_col, y_col]].copy()
+    out.columns = ["x", "y"]
+    out["x"] = pd.to_numeric(out["x"], errors="coerce")
+    out["y"] = pd.to_numeric(out["y"], errors="coerce")
+    return out.dropna(subset=["x", "y"]).reset_index(drop=True)
 
 
 def _extract_first_number(value: object) -> float | None:

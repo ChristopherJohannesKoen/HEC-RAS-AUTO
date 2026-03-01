@@ -95,6 +95,7 @@ def write_geometry_file(
         cut = sec.cutline if sec.cutline else [(0.0, 0.0), (1.0, 1.0)]
         if len(cut) < 2:
             cut = [cut[0], cut[0]]
+        cut_coords = [(float(x), float(y)) for x, y in cut]
 
         lines.append(
             "Type RM Length L Ch R = 1 ,"
@@ -104,11 +105,8 @@ def write_geometry_file(
         lines.append("BEGIN DESCRIPTION:")
         lines.append(f"Auto-generated cross section at chainage {sec.chainage_m:.3f} m")
         lines.append("END DESCRIPTION:")
-        lines.append("XS GIS Cut Line=2")
-        lines.append(
-            f"{cut[0][0]:.6f} {cut[0][1]:.6f} "
-            f"{cut[1][0]:.6f} {cut[1][1]:.6f}"
-        )
+        lines.append(f"XS GIS Cut Line={len(cut_coords)}")
+        lines.extend(_format_reach_xy_lines(cut_coords))
         lines.append(f"Node Last Edited Time={now}")
         lines.append(f"#Sta/Elev= {len(station_pairs)} ")
         lines.extend(_format_sta_elev_lines(station_pairs))
@@ -252,9 +250,9 @@ def _format_reach_xy_lines(coords: list[tuple[float, float]]) -> list[str]:
         x1, y1 = coords[i]
         if i + 1 < len(coords):
             x2, y2 = coords[i + 1]
-            out.append(f"{x1:>16.6f} {y1:>16.6f} {x2:>16.6f} {y2:>16.6f}")
+            out.append(f"{x1:>16.6f}{y1:>16.6f}{x2:>16.6f}{y2:>16.6f}")
         else:
-            out.append(f"{x1:>16.6f} {y1:>16.6f}")
+            out.append(f"{x1:>16.6f}{y1:>16.6f}")
         i += 2
     return out
 
