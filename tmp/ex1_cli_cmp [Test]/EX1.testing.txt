@@ -1,0 +1,17 @@
+Plan added to testing list title:'Existing Conditions Run'  file:'d:\Documents\HEC-RAS-AUTO\Code\HEC-RAS-AUTO\tmp\ex1_cli_cmp [Test]\EX1.p01'
+--------------------------------------------------------------------------------
+Testing plan title:'Existing Conditions Run'
+  After Loading Plan for testing
+    Plan Geometry file:   'd:\Documents\HEC-RAS-AUTO\Code\HEC-RAS-AUTO\tmp\ex1_cli_cmp [Test]\EX1.g01'
+    Project Geometry file:'d:\Documents\HEC-RAS-AUTO\Code\HEC-RAS-AUTO\tmp\ex1_cli_cmp [Test]\EX1.g01'
+  RunSteady() called, plan extension:p01
+  Starting Process:'D:\Program Files\HEC\HEC-RAS\6.6\RasProcess.exe'  args: CompletePreProcess "d:\Documents\HEC-RAS-AUTO\Code\HEC-RAS-AUTO\tmp\ex1_cli_cmp [Test]\EX1.rasmap" "d:\Documents\HEC-RAS-AUTO\Code\HEC-RAS-AUTO\tmp\ex1_cli_cmp [Test]\EX1.p01.tmp.hdf"
+--------------------------------------------------------------------------------
+  Success - testing program closing normally
+--------------------------------------------------------------------------------
+Plan added to testing list title:'Existing Conditions Run'  file:'d:\Documents\HEC-RAS-AUTO\Code\HEC-RAS-AUTO\tmp\ex1_cli_cmp [Test]\EX1.p01'
+--------------------------------------------------------------------------------
+Testing plan title:'Existing Conditions Run'
+  After Loading Plan for testing
+    Plan Geometry file:   'd:\Documents\HEC-RAS-AUTO\Code\HEC-RAS-AUTO\tmp\ex1_cli_cmp [Test]\EX1.g01'
+    Project Geometry file:'d:\Documents\HEC-RAS-AUTO\Code\HEC-RAS-AUTO\tmp\ex1_cli_cmp [Test]\EX1.g01'

@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -121,6 +122,12 @@ class HECRASControllerAdapter:
         project_file: Path,
         strict: bool,
     ) -> dict[str, object]:
+        popup_log = run_dir / "popup_events.jsonl"
+        try:
+            popup_log.unlink(missing_ok=True)
+        except Exception:
+            pass
+
         # Primary unattended strategy: explicit current-plan compute using a
         # batch command pattern proven in HEC-Commander workflows:
         #   "Ras.exe" -c "project.prj" "plan.p##"
@@ -129,9 +136,62 @@ class HECRASControllerAdapter:
             run_dir=run_dir,
             project_file=project_file,
             strict=False,
+            popup_log=popup_log,
         )
         if primary.get("success", False):
             return primary
+
+        primary_popup_codes = {
+            str(x).strip().lower() for x in (primary.get("popup_codes", []) or []) if str(x).strip()
+        }
+
+        if primary_popup_codes.intersection({"project_load_error", "project_not_loaded"}):
+            self._repair_project_load_failure(run_dir=run_dir, project_file=project_file)
+            repaired_retry = self._run_compute_cli_current_plan(
+                ras_exe=ras_exe,
+                run_dir=run_dir,
+                project_file=project_file,
+                strict=False,
+                popup_log=popup_log,
+            )
+            retry_msgs = repaired_retry.get("messages", [])
+            if isinstance(retry_msgs, list):
+                retry_msgs.insert(
+                    0,
+                    "Detected project-load popup; applied automatic project text/attribute repair and retried -c compute.",
+                )
+                repaired_retry["messages"] = retry_msgs
+            if repaired_retry.get("success", False):
+                return repaired_retry
+            primary = repaired_retry
+            primary_popup_codes = {
+                str(x).strip().lower()
+                for x in (primary.get("popup_codes", []) or [])
+                if str(x).strip()
+            }
+
+        # If numeric overflow was detected, force a conservative regime retry
+        # before switching launch mode.
+        if "overflow" in primary_popup_codes:
+            self._set_plan_regime_on_disk(run_dir, "Subcritical Flow")
+            retry = self._run_compute_cli_current_plan(
+                ras_exe=ras_exe,
+                run_dir=run_dir,
+                project_file=project_file,
+                strict=False,
+                popup_log=popup_log,
+            )
+            retry_msgs = retry.get("messages", [])
+            if isinstance(retry_msgs, list):
+                retry_msgs.insert(
+                    0,
+                    "Detected overflow popup; automatically set plan regime to "
+                    "'Subcritical Flow' and retried current-plan compute.",
+                )
+                retry["messages"] = retry_msgs
+            if retry.get("success", False):
+                return retry
+            primary = retry
 
         # Secondary fallback: HEC-RAS test mode.
         fallback = self._run_compute_cli_test_mode(
@@ -139,6 +199,7 @@ class HECRASControllerAdapter:
             run_dir=run_dir,
             project_file=project_file,
             strict=False,
+            popup_log=popup_log,
         )
         msgs = []
         prim_msgs = primary.get("messages", [])
@@ -151,9 +212,12 @@ class HECRASControllerAdapter:
         fallback["messages"] = msgs
         success = bool(fallback.get("success", False))
         if strict and not success:
+            popup_hint = f" Popup log: {popup_log}" if popup_log.exists() else ""
+            popup_excerpt = self._latest_popup_excerpt(popup_log)
+            popup_tail = f" Last popup: {popup_excerpt}" if popup_excerpt else ""
             raise HECControllerError(
                 "CLI compute finished without native result artifacts in both -c and -test modes. "
-                "Check HEC-RAS popups/logs and HECRASPlotDriverError.txt."
+                f"Check HEC-RAS popups/logs and HECRASPlotDriverError.txt.{popup_hint}{popup_tail}"
             )
         return fallback
 
@@ -163,6 +227,7 @@ class HECRASControllerAdapter:
         run_dir: Path,
         project_file: Path,
         strict: bool,
+        popup_log: Path | None = None,
     ) -> dict[str, object]:
         self._clear_readonly(run_dir)
         self._repair_plotdriver_state()
@@ -170,7 +235,7 @@ class HECRASControllerAdapter:
         project_abs = project_file.resolve()
         plan_abs = self._pick_plan_file(run_dir, project_abs).resolve()
         bat_path = run_dir / "_hec_run_compute.bat"
-        bat_cmd = f"\"{ras_exe}\" -c \"{project_abs}\" \"{plan_abs}\""
+        bat_cmd = f"\"{ras_exe}\" -c \"{project_abs}\" \"{plan_abs}\" -hideCompute"
         bat_path.write_text(f"@echo off\r\n{bat_cmd}\r\n", encoding="utf-8")
         try:
             proc = subprocess.Popen(
@@ -189,8 +254,26 @@ class HECRASControllerAdapter:
         stall_timeout_sec = max(180, min(self.timeout_sec // 2, 600))
         last_activity = time.time()
         last_seen_mtime = 0.0
+        popup_counts: dict[str, int] = {}
+        terminal_popup_error: str | None = None
+        aborted_by_popup = False
         while proc.poll() is None:
-            self._dismiss_ras_dialogs(aggressive=True)
+            popup_events = self._capture_and_handle_dialogs(
+                run_dir=run_dir,
+                aggressive=True,
+                popup_log=popup_log,
+            )
+            for event in popup_events:
+                code = str(event.get("code", "unknown"))
+                popup_counts[code] = popup_counts.get(code, 0) + 1
+                if code in {"project_not_loaded", "project_load_error"}:
+                    title = str(event.get("title", "RAS"))
+                    body = str(event.get("text", "")).strip()
+                    terminal_popup_error = f"{title}: {body}".strip(": ").strip()
+            if terminal_popup_error:
+                self._close_running_instances()
+                aborted_by_popup = True
+                break
             try:
                 mtimes = [p.stat().st_mtime for p in run_dir.iterdir()]
                 if mtimes:
@@ -228,12 +311,33 @@ class HECRASControllerAdapter:
             messages.append(f"CLI stdout: {stdout.strip()[:4000]}")
         if stderr.strip():
             messages.append(f"CLI stderr: {stderr.strip()[:4000]}")
+        if popup_counts:
+            summary = ", ".join(f"{k}={v}" for k, v in sorted(popup_counts.items()))
+            messages.append(f"Detected HEC-RAS popups: {summary}")
+        if aborted_by_popup and terminal_popup_error:
+            messages.append(
+                "Aborted current-plan compute after terminal popup: "
+                f"{terminal_popup_error}"
+            )
+        if popup_log and popup_log.exists():
+            messages.append(f"Popup diagnostics log: {popup_log}")
 
-        success = bool(artifacts["hdf_files"] or artifacts["output_files"])
-        if strict and not success:
+        data_error_detected = False
+        for p in artifacts.get("data_error_files", []):
+            try:
+                text = Path(p).read_text(encoding="utf-8", errors="ignore").strip()
+                if text:
+                    data_error_detected = True
+                    messages.append(f"HEC-RAS data_errors: {text[:2000]}")
+            except Exception:
+                continue
+
+        success = bool(artifacts["hdf_files"] or artifacts["output_files"]) and not data_error_detected
+        if strict and (not success or aborted_by_popup):
+            popup_hint = f" Popup log: {popup_log}" if popup_log and popup_log.exists() else ""
             raise HECControllerError(
                 "CLI current-plan batch compute finished without result artifacts (*.p##.hdf or *.O##). "
-                "Check HEC-RAS popups/logs and HECRASPlotDriverError.txt."
+                f"Check HEC-RAS popups/logs and HECRASPlotDriverError.txt.{popup_hint}"
             )
 
         try:
@@ -253,6 +357,9 @@ class HECRASControllerAdapter:
             "hdf_files": artifacts["hdf_files"],
             "output_files": artifacts["output_files"],
             "log_files": artifacts["log_files"],
+            "data_error_files": artifacts.get("data_error_files", []),
+            "popup_codes": sorted(popup_counts.keys()),
+            "popup_log": str(popup_log.resolve()) if popup_log and popup_log.exists() else "",
             "backend": "cli",
             "ras_exe": str(ras_exe),
         }
@@ -263,6 +370,7 @@ class HECRASControllerAdapter:
         run_dir: Path,
         project_file: Path,
         strict: bool,
+        popup_log: Path | None = None,
     ) -> dict[str, object]:
         self._clear_readonly(run_dir)
         self._repair_plotdriver_state()
@@ -272,7 +380,7 @@ class HECRASControllerAdapter:
         if test_dir.exists():
             shutil.rmtree(test_dir, ignore_errors=True)
 
-        cmd = [str(ras_exe), str(project_abs), "-test", "-hideCompute"]
+        cmd = [str(ras_exe), "-test", str(project_abs), "-hideCompute"]
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -291,8 +399,26 @@ class HECRASControllerAdapter:
         last_activity = time.time()
         last_seen_mtime = 0.0
         stall_timeout_sec = max(180, min(self.timeout_sec // 2, 600))
+        popup_counts: dict[str, int] = {}
+        terminal_popup_error: str | None = None
+        aborted_by_popup = False
         while proc.poll() is None:
-            self._dismiss_ras_dialogs(aggressive=True)
+            popup_events = self._capture_and_handle_dialogs(
+                run_dir=run_dir,
+                aggressive=True,
+                popup_log=popup_log,
+            )
+            for event in popup_events:
+                code = str(event.get("code", "unknown"))
+                popup_counts[code] = popup_counts.get(code, 0) + 1
+                if code in {"project_not_loaded", "project_load_error"}:
+                    title = str(event.get("title", "RAS"))
+                    body = str(event.get("text", "")).strip()
+                    terminal_popup_error = f"{title}: {body}".strip(": ").strip()
+            if terminal_popup_error:
+                self._close_running_instances()
+                aborted_by_popup = True
+                break
             if test_dir.exists():
                 try:
                     mtimes = [p.stat().st_mtime for p in test_dir.iterdir()]
@@ -355,12 +481,33 @@ class HECRASControllerAdapter:
             messages.append(f"CLI stderr: {stderr.strip()[:4000]}")
         if source_dir == test_dir and not source_artifacts["hdf_files"] and not source_artifacts["output_files"]:
             messages.append("CLI test mode produced no outputs in [Test] folder.")
+        if popup_counts:
+            summary = ", ".join(f"{k}={v}" for k, v in sorted(popup_counts.items()))
+            messages.append(f"Detected HEC-RAS popups: {summary}")
+        if aborted_by_popup and terminal_popup_error:
+            messages.append(
+                "Aborted test-mode compute after terminal popup: "
+                f"{terminal_popup_error}"
+            )
+        if popup_log and popup_log.exists():
+            messages.append(f"Popup diagnostics log: {popup_log}")
 
-        success = bool(artifacts["hdf_files"] or artifacts["output_files"])
-        if strict and not success:
+        data_error_detected = False
+        for p in artifacts.get("data_error_files", []):
+            try:
+                text = Path(p).read_text(encoding="utf-8", errors="ignore").strip()
+                if text:
+                    data_error_detected = True
+                    messages.append(f"HEC-RAS data_errors: {text[:2000]}")
+            except Exception:
+                continue
+
+        success = bool(artifacts["hdf_files"] or artifacts["output_files"]) and not data_error_detected
+        if strict and (not success or aborted_by_popup):
+            popup_hint = f" Popup log: {popup_log}" if popup_log and popup_log.exists() else ""
             raise HECControllerError(
                 "CLI test-batch compute finished without result artifacts (*.p##.hdf or *.O##). "
-                "Check HEC-RAS popups/logs and HECRASPlotDriverError.txt."
+                f"Check HEC-RAS popups/logs and HECRASPlotDriverError.txt.{popup_hint}"
             )
 
         return {
@@ -375,6 +522,9 @@ class HECRASControllerAdapter:
             "hdf_files": artifacts["hdf_files"],
             "output_files": artifacts["output_files"],
             "log_files": artifacts["log_files"],
+            "data_error_files": artifacts.get("data_error_files", []),
+            "popup_codes": sorted(popup_counts.keys()),
+            "popup_log": str(popup_log.resolve()) if popup_log and popup_log.exists() else "",
             "backend": "cli",
             "ras_exe": str(ras_exe),
         }
@@ -754,6 +904,41 @@ class HECRASControllerAdapter:
             check=False,
         )
 
+    def _repair_project_load_failure(self, run_dir: Path, project_file: Path) -> None:
+        # Best-effort repair for "Error loading project data from file" popups.
+        self._clear_readonly(run_dir)
+        candidate_files = [
+            project_file,
+            run_dir / "Meerlustkloof.prj",
+            run_dir / "Meerlustkloof.p01",
+            run_dir / "Meerlustkloof.g01",
+            run_dir / "Meerlustkloof.f01",
+        ]
+        for path in candidate_files:
+            if path.exists() and path.is_file():
+                self._rewrite_crlf_cp1252(path)
+        # Remove stale test clone if present to avoid mixing broken state.
+        test_dir = run_dir.parent / f"{run_dir.name} [Test]"
+        if test_dir.exists():
+            shutil.rmtree(test_dir, ignore_errors=True)
+
+    @staticmethod
+    def _rewrite_crlf_cp1252(path: Path) -> None:
+        try:
+            text = path.read_text(encoding="cp1252", errors="ignore")
+        except Exception:
+            return
+        # Normalize all line endings to CRLF because HEC-RAS text parsers can
+        # be sensitive in some environments.
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        rebuilt = "\r\n".join(normalized.split("\n"))
+        if not rebuilt.endswith("\r\n"):
+            rebuilt += "\r\n"
+        try:
+            path.write_text(rebuilt, encoding="cp1252")
+        except Exception:
+            pass
+
     def _collect_output_files(self, run_dir: Path) -> dict[str, list[str]]:
         plans = sorted(
             [p for p in run_dir.iterdir() if re.search(r"\.p\d\d$", p.name.lower())],
@@ -771,11 +956,17 @@ class HECRASControllerAdapter:
             reverse=True,
         )
         logs = sorted(run_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        data_errors = sorted(
+            run_dir.glob("*.data_errors.txt"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
         return {
             "plan_files": [str(p.resolve()) for p in plans],
             "hdf_files": [str(p.resolve()) for p in hdfs],
             "output_files": [str(p.resolve()) for p in outputs],
             "log_files": [str(p.resolve()) for p in logs],
+            "data_error_files": [str(p.resolve()) for p in data_errors],
         }
 
     @staticmethod
@@ -783,9 +974,25 @@ class HECRASControllerAdapter:
         try:
             root = Path.home() / "AppData" / "Local" / "PlotDriver"
             root.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                ["attrib", "-R", str(root / "*"), "/S", "/D"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
             for candidate in root.glob("RasPlotDriver.exe_Url_*"):
                 try:
-                    (candidate / "1.0.0.0").mkdir(parents=True, exist_ok=True)
+                    version_dir = candidate / "1.0.0.0"
+                    version_dir.mkdir(parents=True, exist_ok=True)
+                    for tmp in version_dir.glob("*.tmp"):
+                        try:
+                            tmp.chmod(0o666)
+                        except Exception:
+                            pass
+                        try:
+                            tmp.unlink(missing_ok=True)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             error_log = Path("HECRASPlotDriverError.txt")
@@ -804,9 +1011,57 @@ class HECRASControllerAdapter:
             pass
 
     @staticmethod
+    def _repair_plotdriver_access_from_text(text: str) -> None:
+        if not text:
+            return
+        matches = re.findall(
+            r"Access to the path '([^']+)' is denied",
+            text,
+            flags=re.IGNORECASE,
+        )
+        for raw in matches:
+            try:
+                p = Path(raw)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                subprocess.run(
+                    ["attrib", "-R", str(p.parent / "*"), "/S", "/D"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                username = os.environ.get("USERNAME", "").strip()
+                if username:
+                    subprocess.run(
+                        [
+                            "icacls",
+                            str(p.parent),
+                            "/grant",
+                            f"{username}:(OI)(CI)F",
+                            "/T",
+                            "/C",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                if p.exists():
+                    try:
+                        p.chmod(0o666)
+                    except Exception:
+                        pass
+                    try:
+                        p.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+
+    @staticmethod
     def _is_plan_hdf(path: Path) -> bool:
         name = path.name.lower()
         if name == "terrain.hdf":
+            return False
+        if name.endswith(".tmp.hdf"):
             return False
         if ".g" in name and name.endswith(".hdf"):
             return False
@@ -825,7 +1080,6 @@ class HECRASControllerAdapter:
     @staticmethod
     def _dismiss_ras_dialogs(aggressive: bool = False) -> int:
         try:
-            import win32con  # type: ignore[import-not-found]
             import win32gui  # type: ignore[import-not-found]
         except ImportError:
             return 0
@@ -844,8 +1098,8 @@ class HECRASControllerAdapter:
                 if aggressive and title in {"Error", "Restart Plot Process?"}:
                     should_close = True
                 if should_close and cls == "#32770":
-                    win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
-                    closed += 1
+                    if HECRASControllerAdapter._close_dialog_window(hwnd):
+                        closed += 1
             except Exception:
                 return True
             return True
@@ -855,6 +1109,234 @@ class HECRASControllerAdapter:
         except Exception:
             return closed
         return closed
+
+    def _capture_and_handle_dialogs(
+        self,
+        run_dir: Path,
+        aggressive: bool,
+        popup_log: Path | None = None,
+    ) -> list[dict[str, object]]:
+        events = self._inspect_ras_dialogs(aggressive=aggressive)
+        if not events:
+            return []
+
+        handled: list[dict[str, object]] = []
+        for event in events:
+            title = str(event.get("title", "")).strip()
+            text = str(event.get("text", "")).strip()
+            code, severity, diagnosis = self._classify_popup(title=title, text=text)
+            actions: list[str] = []
+
+            if code == "plotdriver_path_missing":
+                self._repair_plotdriver_state()
+                self._repair_plotdriver_access_from_text(text)
+                actions.append("repair_plotdriver_state")
+            elif code in {"save_access_denied", "save_readonly"}:
+                self._clear_readonly(run_dir)
+                actions.append("clear_readonly_attributes")
+
+            hwnd = int(event.get("hwnd", 0) or 0)
+            closed = self._close_dialog_window(hwnd) if hwnd else False
+            actions.append("close_dialog" if closed else "close_dialog_failed")
+
+            enriched = {
+                "ts_utc": datetime.now(timezone.utc).isoformat(),
+                "hwnd": hwnd,
+                "title": title,
+                "text": text,
+                "code": code,
+                "severity": severity,
+                "diagnosis": diagnosis,
+                "actions": actions,
+            }
+            handled.append(enriched)
+
+        self._append_popup_events(log_path=popup_log or (run_dir / "popup_events.jsonl"), events=handled)
+        return handled
+
+    @staticmethod
+    def _inspect_ras_dialogs(aggressive: bool = False) -> list[dict[str, object]]:
+        try:
+            import win32gui  # type: ignore[import-not-found]
+        except ImportError:
+            return []
+
+        dialogs: list[dict[str, object]] = []
+        targeted_titles = {"RAS", "Error", "Restart Plot Process?", "RasProcess.exe - Application Error"}
+
+        def _cb(hwnd: int, _lparam: int) -> bool:
+            try:
+                if not win32gui.IsWindowVisible(hwnd):
+                    return True
+                cls = win32gui.GetClassName(hwnd).strip()
+                if cls != "#32770":
+                    return True
+                title = win32gui.GetWindowText(hwnd).strip()
+                if not aggressive and title != "RAS":
+                    return True
+                if aggressive and title not in targeted_titles and title != "RAS":
+                    return True
+                dialogs.append(
+                    {
+                        "hwnd": int(hwnd),
+                        "title": title,
+                        "class": cls,
+                        "text": HECRASControllerAdapter._extract_dialog_text(hwnd),
+                    }
+                )
+            except Exception:
+                return True
+            return True
+
+        try:
+            win32gui.EnumWindows(_cb, None)
+        except Exception:
+            return dialogs
+        return dialogs
+
+    @staticmethod
+    def _extract_dialog_text(hwnd: int) -> str:
+        try:
+            import win32gui  # type: ignore[import-not-found]
+        except ImportError:
+            return ""
+
+        lines: list[str] = []
+
+        try:
+            root_title = win32gui.GetWindowText(hwnd).strip()
+            if root_title:
+                lines.append(root_title)
+        except Exception:
+            pass
+
+        def _child_cb(ch: int, _lparam: int) -> bool:
+            try:
+                cls = win32gui.GetClassName(ch).strip()
+                txt = win32gui.GetWindowText(ch).strip()
+                if not txt:
+                    return True
+                if cls not in {"Static", "Edit", "RichEdit20W", "RichEdit20A", "Button"}:
+                    return True
+                if txt in {"OK", "Yes", "No", "Cancel", "Retry", "Close"}:
+                    return True
+                if txt.startswith("&"):
+                    return True
+                lines.append(txt)
+            except Exception:
+                return True
+            return True
+
+        try:
+            win32gui.EnumChildWindows(hwnd, _child_cb, None)
+        except Exception:
+            pass
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for line in lines:
+            clean = line.strip()
+            if not clean:
+                continue
+            key = clean.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(clean)
+        return "\n".join(deduped)
+
+    @staticmethod
+    def _classify_popup(title: str, text: str) -> tuple[str, str, str]:
+        merged = f"{title}\n{text}".lower()
+
+        if "error in writing intermediate computation file" in merged and "overflow" in merged:
+            return ("overflow", "error", "Numerical overflow during steady computation.")
+        if "a project must be loaded before computations can be performed" in merged:
+            return ("project_not_loaded", "error", "HEC-RAS reports no loaded project at compute time.")
+        if "error loading project data from file" in merged:
+            return ("project_load_error", "error", "HEC-RAS could not load the project file.")
+        if "error in saving geometry data" in merged and "read-only" in merged:
+            return ("save_readonly", "error", "Geometry save failed due to read-only attributes.")
+        if "path/file access error" in merged or "access to the path is denied" in merged:
+            return ("save_access_denied", "error", "File access denied while HEC-RAS was saving/loading.")
+        if "failed to save settings" in merged and "plotdriver" in merged:
+            return ("plotdriver_path_missing", "warn", "PlotDriver configuration path missing/broken.")
+        if "run-time error '5'" in merged and "invalid procedure call or argument" in merged:
+            return ("runtime5_invalid_argument", "error", "HEC-RAS internal runtime error 5.")
+        if "restart plot process" in merged:
+            return ("plotdriver_restart", "warn", "Plot process crashed and requested restart.")
+        return ("unknown_popup", "warn", "Unclassified HEC-RAS popup.")
+
+    @staticmethod
+    def _close_dialog_window(hwnd: int) -> bool:
+        try:
+            import win32con  # type: ignore[import-not-found]
+            import win32gui  # type: ignore[import-not-found]
+        except ImportError:
+            return False
+
+        buttons: list[tuple[int, str]] = []
+
+        def _child_cb(ch: int, _lparam: int) -> bool:
+            try:
+                cls = win32gui.GetClassName(ch).strip()
+                if cls != "Button":
+                    return True
+                txt = win32gui.GetWindowText(ch).strip()
+                buttons.append((ch, txt))
+            except Exception:
+                return True
+            return True
+
+        try:
+            win32gui.EnumChildWindows(hwnd, _child_cb, None)
+        except Exception:
+            pass
+
+        for label in ("OK", "Yes", "Close", "Retry", "Cancel", "No"):
+            for ch, txt in buttons:
+                if txt == label:
+                    try:
+                        win32gui.PostMessage(ch, win32con.BM_CLICK, 0, 0)
+                        return True
+                    except Exception:
+                        pass
+
+        try:
+            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _append_popup_events(log_path: Path, events: list[dict[str, object]]) -> None:
+        if not events:
+            return
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as f:
+                for event in events:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except Exception:
+            # Logging popups is helpful, but must never break compute flow.
+            pass
+
+    @staticmethod
+    def _latest_popup_excerpt(log_path: Path) -> str:
+        if not log_path.exists():
+            return ""
+        try:
+            lines = [ln for ln in log_path.read_text(encoding="utf-8", errors="ignore").splitlines() if ln.strip()]
+            if not lines:
+                return ""
+            last = json.loads(lines[-1])
+            code = str(last.get("code", "unknown"))
+            text = str(last.get("text", "")).strip().replace("\n", " ")
+            if len(text) > 240:
+                text = text[:240] + "..."
+            return f"{code}: {text}"
+        except Exception:
+            return ""
 
     @staticmethod
     def _close_running_instances() -> None:
