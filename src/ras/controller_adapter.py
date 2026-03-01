@@ -33,7 +33,9 @@ class HECRASControllerAdapter:
                 "powershell",
                 "-NoProfile",
                 "-Command",
-                "(@(Get-Process Ras -ErrorAction SilentlyContinue) + @(Get-Process RasProcess -ErrorAction SilentlyContinue)).Count",
+                "(@(Get-Process Ras -ErrorAction SilentlyContinue) + "
+                "@(Get-Process RasProcess -ErrorAction SilentlyContinue) + "
+                "@(Get-Process RasPlotDriver -ErrorAction SilentlyContinue)).Count",
             ],
             capture_output=True,
             text=True,
@@ -49,7 +51,8 @@ class HECRASControllerAdapter:
             self._close_running_instances()
             return
         raise HECControllerError(
-            f"Detected {count} running Ras.exe instances. Close them before unattended run."
+            f"Detected {count} running HEC-RAS processes (Ras/RasProcess/RasPlotDriver). "
+            "Close them before unattended run."
         )
 
     def run_compute(
@@ -122,6 +125,9 @@ class HECRASControllerAdapter:
         project_file: Path,
         strict: bool,
     ) -> dict[str, object]:
+        self._close_running_instances()
+        self._prepare_run_workspace(run_dir)
+        self._ensure_plotdriver_writable()
         popup_log = run_dir / "popup_events.jsonl"
         try:
             popup_log.unlink(missing_ok=True)
@@ -270,14 +276,20 @@ class HECRASControllerAdapter:
                     title = str(event.get("title", "RAS"))
                     body = str(event.get("text", "")).strip()
                     terminal_popup_error = f"{title}: {body}".strip(": ").strip()
+                elif code == "overflow":
+                    terminal_popup_error = "Overflow detected in current-plan compute."
+            if popup_counts.get("plotdriver_path_missing", 0) >= 3:
+                terminal_popup_error = (
+                    "Repeated PlotDriver write/access popups detected "
+                    "(plotdriver_path_missing >= 3)."
+                )
             if terminal_popup_error:
                 self._close_running_instances()
                 aborted_by_popup = True
                 break
             try:
-                mtimes = [p.stat().st_mtime for p in run_dir.iterdir()]
-                if mtimes:
-                    current_mtime = max(mtimes)
+                current_mtime = self._activity_marker_mtime(run_dir)
+                if current_mtime > 0.0:
                     if current_mtime > last_seen_mtime:
                         last_seen_mtime = current_mtime
                         last_activity = time.time()
@@ -415,15 +427,21 @@ class HECRASControllerAdapter:
                     title = str(event.get("title", "RAS"))
                     body = str(event.get("text", "")).strip()
                     terminal_popup_error = f"{title}: {body}".strip(": ").strip()
+                elif code == "overflow":
+                    terminal_popup_error = "Overflow detected in test-mode compute."
+            if popup_counts.get("plotdriver_path_missing", 0) >= 3:
+                terminal_popup_error = (
+                    "Repeated PlotDriver write/access popups detected "
+                    "(plotdriver_path_missing >= 3)."
+                )
             if terminal_popup_error:
                 self._close_running_instances()
                 aborted_by_popup = True
                 break
             if test_dir.exists():
                 try:
-                    mtimes = [p.stat().st_mtime for p in test_dir.iterdir()]
-                    if mtimes:
-                        current_mtime = max(mtimes)
+                    current_mtime = self._activity_marker_mtime(test_dir)
+                    if current_mtime > 0.0:
                         if current_mtime > last_seen_mtime:
                             last_seen_mtime = current_mtime
                             last_activity = time.time()
@@ -904,15 +922,51 @@ class HECRASControllerAdapter:
             check=False,
         )
 
+    def _prepare_run_workspace(self, run_dir: Path) -> None:
+        self._ensure_directory_modify_permissions(run_dir)
+        self._clear_readonly(run_dir)
+        for pattern in ("*.tmp.hdf", "*.data_errors.txt", "*.computeMsgs.txt"):
+            for path in run_dir.glob(pattern):
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        # HEC-RAS can regenerate geometry hdf sidecars from .g## files.
+        for path in run_dir.glob("*.g??.hdf"):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _ensure_directory_modify_permissions(path: Path) -> None:
+        userdomain = os.environ.get("USERDOMAIN", "").strip()
+        username = os.environ.get("USERNAME", "").strip()
+        if not username:
+            return
+        account = f"{userdomain}\\{username}" if userdomain else username
+        subprocess.run(
+            [
+                "icacls",
+                str(path),
+                "/grant",
+                f"{account}:(OI)(CI)M",
+                "/T",
+                "/C",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def _repair_project_load_failure(self, run_dir: Path, project_file: Path) -> None:
         # Best-effort repair for "Error loading project data from file" popups.
+        self._ensure_directory_modify_permissions(run_dir)
         self._clear_readonly(run_dir)
         candidate_files = [
             project_file,
             run_dir / "Meerlustkloof.prj",
             run_dir / "Meerlustkloof.p01",
-            run_dir / "Meerlustkloof.g01",
-            run_dir / "Meerlustkloof.f01",
         ]
         for path in candidate_files:
             if path.exists() and path.is_file():
@@ -928,14 +982,11 @@ class HECRASControllerAdapter:
             text = path.read_text(encoding="cp1252", errors="ignore")
         except Exception:
             return
-        # Normalize all line endings to CRLF because HEC-RAS text parsers can
-        # be sensitive in some environments.
+        # Normalize line endings without introducing CRCRLF artifacts.
         normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-        rebuilt = "\r\n".join(normalized.split("\n"))
-        if not rebuilt.endswith("\r\n"):
-            rebuilt += "\r\n"
+        rebuilt = normalized.rstrip("\n") + "\n"
         try:
-            path.write_text(rebuilt, encoding="cp1252")
+            path.write_text(rebuilt, encoding="cp1252", newline="\n")
         except Exception:
             pass
 
@@ -968,6 +1019,46 @@ class HECRASControllerAdapter:
             "log_files": [str(p.resolve()) for p in logs],
             "data_error_files": [str(p.resolve()) for p in data_errors],
         }
+
+    @staticmethod
+    def _activity_marker_mtime(path: Path) -> float:
+        patterns = (
+            "*.p??.hdf",
+            "*.p??.tmp.hdf",
+            "*.o??",
+            "*.r??",
+            "*.computeMsgs.txt",
+            "*.data_errors.txt",
+            "*.log",
+        )
+        mtimes: list[float] = []
+        for pattern in patterns:
+            for p in path.glob(pattern):
+                try:
+                    mtimes.append(p.stat().st_mtime)
+                except Exception:
+                    continue
+        return max(mtimes) if mtimes else 0.0
+
+    def _ensure_plotdriver_writable(self) -> None:
+        root = Path.home() / "AppData" / "Local" / "PlotDriver"
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            raise HECControllerError(
+                f"PlotDriver cache path is not accessible: {root} ({exc})."
+            ) from exc
+
+        probe = root / "codex_plotdriver_write_probe.tmp"
+        try:
+            probe.write_text("probe", encoding="ascii")
+            probe.unlink(missing_ok=True)
+        except Exception as exc:
+            raise HECControllerError(
+                "PlotDriver cache path is not writable. "
+                f"HEC-RAS cannot run unattended because it must write under '{root}'. "
+                "Close all HEC-RAS/RasPlotDriver processes and verify local profile write permissions."
+            ) from exc
 
     @staticmethod
     def _repair_plotdriver_state() -> None:
@@ -1011,9 +1102,10 @@ class HECRASControllerAdapter:
             pass
 
     @staticmethod
-    def _repair_plotdriver_access_from_text(text: str) -> None:
+    def _repair_plotdriver_access_from_text(text: str) -> bool:
         if not text:
-            return
+            return False
+        changed = False
         matches = re.findall(
             r"Access to the path '([^']+)' is denied",
             text,
@@ -1053,8 +1145,40 @@ class HECRASControllerAdapter:
                         p.unlink(missing_ok=True)
                     except Exception:
                         pass
+                changed = True
             except Exception:
                 continue
+        return changed
+
+    @staticmethod
+    def _repair_geometry_hdf_write_issue(text: str, run_dir: Path) -> bool:
+        if not text:
+            return False
+        changed = False
+        matches = re.findall(
+            r"Error writing geometry file \(hdf version\):\s*([^\r\n]+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        for raw in matches:
+            candidate = raw.strip().strip('"')
+            if not candidate:
+                continue
+            p = Path(candidate)
+            # Guardrail: only operate inside current run folder.
+            try:
+                p_resolved = p.resolve()
+                run_resolved = run_dir.resolve()
+                if run_resolved not in p_resolved.parents and p_resolved != run_resolved:
+                    continue
+            except Exception:
+                continue
+            try:
+                p.unlink(missing_ok=True)
+                changed = True
+            except Exception:
+                continue
+        return changed
 
     @staticmethod
     def _is_plan_hdf(path: Path) -> bool:
@@ -1129,8 +1253,14 @@ class HECRASControllerAdapter:
 
             if code == "plotdriver_path_missing":
                 self._repair_plotdriver_state()
-                self._repair_plotdriver_access_from_text(text)
+                repaired = self._repair_plotdriver_access_from_text(text)
                 actions.append("repair_plotdriver_state")
+                if repaired:
+                    actions.append("repair_plotdriver_acl")
+            elif code == "geometry_hdf_write_error":
+                repaired = self._repair_geometry_hdf_write_issue(text=text, run_dir=run_dir)
+                if repaired:
+                    actions.append("repair_geometry_hdf")
             elif code in {"save_access_denied", "save_readonly"}:
                 self._clear_readonly(run_dir)
                 actions.append("clear_readonly_attributes")
@@ -1251,6 +1381,8 @@ class HECRASControllerAdapter:
 
         if "error in writing intermediate computation file" in merged and "overflow" in merged:
             return ("overflow", "error", "Numerical overflow during steady computation.")
+        if "error writing geometry file (hdf version)" in merged:
+            return ("geometry_hdf_write_error", "error", "HEC-RAS failed to write geometry hdf sidecar.")
         if "a project must be loaded before computations can be performed" in merged:
             return ("project_not_loaded", "error", "HEC-RAS reports no loaded project at compute time.")
         if "error loading project data from file" in merged:
@@ -1345,12 +1477,13 @@ class HECRASControllerAdapter:
                 "powershell",
                 "-NoProfile",
                 "-Command",
-                "Get-Process Ras,RasProcess -ErrorAction SilentlyContinue | Stop-Process -Force",
+                "Get-Process Ras,RasProcess,RasPlotDriver -ErrorAction SilentlyContinue | Stop-Process -Force",
             ],
             capture_output=True,
             text=True,
             check=False,
         )
+        time.sleep(0.4)
 
     @staticmethod
     def _pick_project_file(run_project_dir: Path) -> Path:
