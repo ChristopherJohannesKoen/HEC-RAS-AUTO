@@ -4,8 +4,8 @@ from pydantic import BaseModel, Field
 
 
 class AgentConfig(BaseModel):
-    parser_model: str = "gpt-4o-mini"
-    planner_model: str = "gpt-4o-mini"
+    parser_model: str = "gpt-5"
+    planner_model: str = "gpt-5"
     max_parse_retries: int = 2
     enable_self_heal: bool = True
     retry_budget_per_stage: int = 1

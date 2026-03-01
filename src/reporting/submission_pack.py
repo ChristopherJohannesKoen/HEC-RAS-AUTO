@@ -62,7 +62,11 @@ def _collect_reports(base_run_id: str, scenario_run_id: str, output_root: Path) 
     out = []
     for p in [
         output_root / "reports" / f"{base_run_id}_report_draft.md",
+        output_root / "reports" / f"{base_run_id}_final_ai_report.md",
+        output_root / "reports" / f"{base_run_id}_final_ai_report.docx",
         output_root / "reports" / f"{scenario_run_id}_report_draft.md",
+        output_root / "reports" / f"{scenario_run_id}_final_ai_report.md",
+        output_root / "reports" / f"{scenario_run_id}_final_ai_report.docx",
     ]:
         if p.exists():
             out.append(str(p))

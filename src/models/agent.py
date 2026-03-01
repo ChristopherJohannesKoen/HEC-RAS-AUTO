@@ -18,11 +18,13 @@ class RepairPrompts(BaseModel):
 
 class ReportPrompts(BaseModel):
     interpretation: str = ""
+    full_report: str = ""
 
 
 class PromptConfig(BaseModel):
     anomaly_triage: str = ""
     report_reasoning: str = ""
+    input_review: str = ""
     prompt_compiler: PromptCompilerPrompts = Field(default_factory=PromptCompilerPrompts)
     planner: PlannerPrompts = Field(default_factory=PlannerPrompts)
     repair: RepairPrompts = Field(default_factory=RepairPrompts)
@@ -31,7 +33,7 @@ class PromptConfig(BaseModel):
 
 class AIAgentConfig(BaseModel):
     provider: str = "openai"
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-5"
     api_key_env: str = "OPENAI_API_KEY"
     temperature: float = 0.1
     max_tokens: int = 800

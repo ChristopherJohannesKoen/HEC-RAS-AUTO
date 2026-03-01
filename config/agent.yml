@@ -1,6 +1,6 @@
 agent:
-  parser_model: "gpt-4o-mini"
-  planner_model: "gpt-4o-mini"
+  parser_model: "gpt-5"
+  planner_model: "gpt-5"
   max_parse_retries: 2
   enable_self_heal: true
   retry_budget_per_stage: 1

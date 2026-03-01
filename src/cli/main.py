@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 import typer
+from typer.models import OptionInfo
 
 from src.common.config import (
     load_ai_config,
@@ -22,6 +23,7 @@ from src.common.logging import configure_logging
 from src.common.paths import ensure_repo_paths
 from src.agent.orchestrator import AutopilotOrchestrator, OpenAIAdvisor
 from src.agent.citation_scorer import filter_citations, score_citations
+from src.agent.input_reviewer import InputReviewer
 from src.agent.prompt_compiler import PromptCompiler
 from src.agent.retrieval import WebCitationRetriever
 from src.agent.task_engine import TaskEngine
@@ -56,6 +58,7 @@ from src.ras.result_locator import locate_run_results
 from src.ras.sdf_writer import write_rasimport_sdf
 from src.post.cad_export import export_floodline_dxf
 from src.reporting.report_builder import build_report
+from src.reporting.ai_word_report import build_ai_word_report
 from src.reporting.submission_pack import build_submission_pack
 from src.scenarios.scenario_compare import compare_runs
 from src.scenarios.scenario_loader import load_scenario
@@ -331,11 +334,30 @@ def compare(base: str = typer.Option("baseline"), other: str = typer.Option("sce
 
 
 @app.command("build-report")
-def build_report_cmd(run_id: str = typer.Option("baseline")) -> None:
-    """Render markdown report draft for a run."""
+def build_report_cmd(
+    run_id: str = typer.Option("baseline"),
+    ai: Path = typer.Option(Path("config/ai.yml")),
+    write_word_doc: bool = typer.Option(False, help="Generate AI-assisted final .docx report."),
+) -> None:
+    """Render markdown report draft for a run (and optional AI-assisted Word report)."""
+    # This command is also called internally from Python (not only via Typer CLI).
+    # In that path, Typer OptionInfo defaults may be passed through unchanged.
+    if isinstance(run_id, OptionInfo):
+        run_id = "baseline"
+    if isinstance(ai, OptionInfo):
+        ai = Path("config/ai.yml")
+    if isinstance(write_word_doc, OptionInfo):
+        write_word_doc = False
+
     configure_logging()
     path = build_report(run_id)
     typer.echo(f"Report draft: {path}")
+    if write_word_doc:
+        ai_cfg = load_ai_config(ai).ai
+        prompt_text = _load_prompt_text_for_run(run_id)
+        artifacts = build_ai_word_report(run_id=run_id, prompt_text=prompt_text, ai_config=ai_cfg)
+        typer.echo(f"AI final report (md): {artifacts['markdown']}")
+        typer.echo(f"AI final report (docx): {artifacts['docx']}")
 
 
 @app.command()
@@ -603,7 +625,12 @@ def agent_plan(
     configure_logging()
     ai_cfg = load_ai_config(ai).ai
     ag_cfg = load_agent_config(agent_config).agent
-    compiler = PromptCompiler(ai_cfg, max_retries=ag_cfg.max_parse_retries)
+    compiler = PromptCompiler(
+        ai_cfg,
+        max_retries=ag_cfg.max_parse_retries,
+        parser_model=ag_cfg.parser_model,
+        planner_model=ag_cfg.planner_model,
+    )
     spec = compiler.compile_job_spec(
         prompt_text=prompt,
         run_id=run_id,
@@ -640,7 +667,12 @@ def agent_run(
     ai_cfg = load_ai_config(ai).ai
     ag_cfg = load_agent_config(agent_config).agent
     ret_cfg = load_retrieval_config(retrieval).retrieval
-    compiler = PromptCompiler(ai_cfg, max_retries=ag_cfg.max_parse_retries)
+    compiler = PromptCompiler(
+        ai_cfg,
+        max_retries=ag_cfg.max_parse_retries,
+        parser_model=ag_cfg.parser_model,
+        planner_model=ag_cfg.planner_model,
+    )
 
     spec = compiler.compile_job_spec(
         prompt_text=prompt,
@@ -649,6 +681,17 @@ def agent_run(
         assigned_scenario_override=assigned_scenario,
         strict=strict,
     )
+
+    reviewer = InputReviewer(ai_cfg)
+    review = reviewer.review_and_prepare_sheets(
+        prompt_text=prompt,
+        source_dir=Path(source),
+        sheets_path=sheets,
+        run_id=run_id,
+    )
+    effective_sheets = Path(str(review.get("runtime_sheets_path", sheets)))
+    _apply_prompt_overrides_to_spec(spec, review.get("prompt_overrides", {}))
+
     plan = compiler.compile_execution_plan(spec, run_id=run_id)
     compiler.persist_plan_artifacts(run_id, spec, plan)
 
@@ -663,7 +706,7 @@ def agent_run(
         run_id=run_id,
         strict=strict,
         config=config,
-        sheets=sheets,
+        sheets=effective_sheets,
         thresholds=thresholds,
         automation=automation,
         ai_cfg=ai_cfg,
@@ -716,6 +759,8 @@ def agent_resume(
     ai_cfg = load_ai_config(ai).ai
     ag_cfg = load_agent_config(agent_config).agent
     ret_cfg = load_retrieval_config(retrieval).retrieval
+    runtime_sheets = Path("outputs") / run_id / "agent" / "sheets_runtime.yml"
+    effective_sheets = runtime_sheets if runtime_sheets.exists() else sheets
     engine = TaskEngine(
         run_id=run_id,
         retry_budget_per_stage=ag_cfg.retry_budget_per_stage,
@@ -727,7 +772,7 @@ def agent_resume(
         run_id=run_id,
         strict=strict,
         config=config,
-        sheets=sheets,
+        sheets=effective_sheets,
         thresholds=thresholds,
         automation=automation,
         ai_cfg=ai_cfg,
@@ -1085,6 +1130,43 @@ def _write_sweep_envelope(base_run: str, scenario_runs: list[str]) -> Path:
     return env_path
 
 
+def _load_prompt_text_for_run(run_id: str) -> str:
+    prompt_parse = Path("outputs") / run_id / "agent" / "prompt_parse.json"
+    if prompt_parse.exists():
+        try:
+            payload = json.loads(prompt_parse.read_text(encoding="utf-8"))
+            text = str(payload.get("raw_prompt", "")).strip()
+            if text:
+                return text
+        except Exception:
+            pass
+    draft = Path("outputs") / "reports" / f"{run_id}_report_draft.md"
+    if draft.exists():
+        try:
+            return draft.read_text(encoding="utf-8", errors="ignore")[:20000]
+        except Exception:
+            return ""
+    return ""
+
+
+def _apply_prompt_overrides_to_spec(spec, overrides: object) -> None:
+    if not isinstance(overrides, dict):
+        return
+    scenario = str(overrides.get("assigned_scenario", "")).strip().lower()
+    if scenario in {"scenario_1", "scenario_2", "scenario_3", "scenario_4"}:
+        spec.assigned_scenario = scenario
+
+    objective = str(overrides.get("objective", "")).strip()
+    if objective:
+        spec.objective = objective
+
+    constraints = overrides.get("constraints", {})
+    if isinstance(constraints, dict):
+        for key, value in constraints.items():
+            if isinstance(value, (str, int, float, bool)):
+                spec.constraints[str(key)] = value
+
+
 def _build_agent_action_registry(
     prompt_spec,
     source: str,
@@ -1184,8 +1266,16 @@ def _build_agent_action_registry(
         sid = _scenario_run_id(scenario_id)
         build_report_cmd(run_id=run_id)
         build_report_cmd(run_id=sid)
+        base_prompt = _load_prompt_text_for_run(run_id) or str(prompt_spec.raw_prompt)
+        scenario_prompt = _load_prompt_text_for_run(sid) or str(prompt_spec.raw_prompt)
+        base_word = build_ai_word_report(run_id=run_id, prompt_text=base_prompt, ai_config=ai_cfg)
+        scenario_word = build_ai_word_report(run_id=sid, prompt_text=scenario_prompt, ai_config=ai_cfg)
         manifest = build_submission_pack(base_run_id=run_id, scenario_run_id=sid)
-        return {"submission_manifest": str(manifest)}
+        return {
+            "submission_manifest": str(manifest),
+            "baseline_word_report": base_word.get("docx", ""),
+            "scenario_word_report": scenario_word.get("docx", ""),
+        }
 
     return {
         "run_baseline_autopilot": run_baseline_autopilot,

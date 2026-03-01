@@ -1,9 +1,9 @@
 ai:
   provider: "openai"
-  model: "gpt-4o-mini"
+  model: "gpt-5"
   api_key_env: "OPENAI_API_KEY"
   temperature: 0.1
-  max_tokens: 1200
+  max_tokens: 3000
   prompts:
     anomaly_triage: >
       You are a hydraulic modeling QA assistant. Classify severity, likely root cause,
@@ -11,6 +11,10 @@ ai:
     report_reasoning: >
       Draft concise hydraulic interpretation text with explicit [VERIFY] and [CITE] markers
       when evidence is incomplete.
+    input_review: >
+      You are a hydraulic data ingestion reviewer. Inspect the user prompt and workbook layout preview.
+      Return strict JSON only with recommended parser settings and safe fixes.
+      Only propose bounded changes that can be applied automatically (sheet names and column mapping).
     prompt_compiler:
       extract_job_spec: >
         Convert the user assignment prompt into a strict JSON job specification for hydraulic
@@ -26,3 +30,7 @@ ai:
     report:
       interpretation: >
         Draft hydraulic interpretation text using quantified outputs and attach [CITE] markers for each claim.
+      full_report: >
+        Draft a complete engineering report body for this hydraulic assignment.
+        Use clear section headings, quantified findings, and explicit assumptions.
+        Keep statements traceable to provided model outputs and mark uncertain items with [VERIFY].

@@ -9,9 +9,17 @@ from src.models import AIAgentConfig, ExecutionPlan, PromptJobSpec, TaskNode
 
 
 class PromptCompiler:
-    def __init__(self, ai_config: AIAgentConfig, max_retries: int = 2) -> None:
+    def __init__(
+        self,
+        ai_config: AIAgentConfig,
+        max_retries: int = 2,
+        parser_model: str | None = None,
+        planner_model: str | None = None,
+    ) -> None:
         self.ai_config = ai_config
         self.max_retries = max_retries
+        self.parser_model = parser_model or ai_config.model
+        self.planner_model = planner_model or ai_config.model
         self._client = self._build_client()
         self.last_model_response_id: str | None = None
 
@@ -216,7 +224,7 @@ class PromptCompiler:
         )
         try:
             resp = self._client.responses.create(
-                model=self.ai_config.model,
+                model=self.parser_model,
                 temperature=self.ai_config.temperature,
                 max_output_tokens=self.ai_config.max_tokens,
                 input=[
