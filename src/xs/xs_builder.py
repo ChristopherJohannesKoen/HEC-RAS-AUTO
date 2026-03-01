@@ -55,6 +55,11 @@ def build_cross_sections(
 
     for i, s in enumerate(sections):
         chainage_for_line = mapped_chainages[i]
+        if centerline_len > 0.0:
+            # Keep cutline construction away from exact line endpoints where
+            # tangent/normal and intersection checks can become unstable.
+            endpoint_pad = max(0.5, min(5.0, 0.001 * centerline_len))
+            chainage_for_line = min(max(chainage_for_line, endpoint_pad), centerline_len - endpoint_pad)
 
         pt = centerline.get_point_at_chainage(chainage_for_line)
         tx, ty = centerline.get_tangent_at_chainage(chainage_for_line, delta=tangent_delta)

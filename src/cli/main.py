@@ -25,6 +25,7 @@ from src.agent.citation_scorer import filter_citations, score_citations
 from src.agent.prompt_compiler import PromptCompiler
 from src.agent.retrieval import WebCitationRetriever
 from src.agent.task_engine import TaskEngine
+from src.intake.dxf_centerline_parser import parse_centerline_dxf
 from src.intake.excel_parser import parse_excel_inputs
 from src.intake.kmz_parser import parse_kmz_map, write_reference_points
 from src.intake.manifest_builder import build_manifest
@@ -106,6 +107,16 @@ def ingest(config: Path = typer.Option(Path("config/project.yml")), sheets: Path
         terrain_tif=cfg.files.terrain_tif,
         debug_out=Path("data/processed/centerline_transform_debug.json"),
     )
+    dxf_path = _infer_dxf_from_dwg(cfg.files.contour_dwg)
+    if dxf_path is not None and dxf_path.exists():
+        try:
+            parse_centerline_dxf(
+                dxf_path=dxf_path,
+                out_dir=Path("data/processed"),
+                excel_centerline_csv=Path("data/processed/centerline_from_excel.csv"),
+            )
+        except Exception as exc:
+            logger.warning("DXF centerline extraction failed (%s); continuing with Excel/Shapefile centerlines.", exc)
     parse_centerline_shapefile(cfg.files.centerline_shp, cfg.project.target_crs_epsg)
     typer.echo(f"Ingest complete. Manifest: data/processed/project_manifest.json ({len(manifest.files)} files)")
 
@@ -910,16 +921,34 @@ def _write_centerline_geojson_from_excel(
 
 
 def _resolve_centerline_geojson() -> Path:
+    dxf_geojson = Path("data/processed/centerline_from_dxf.geojson")
     excel_geojson = Path("data/processed/centerline_from_excel.geojson")
     shp_geojson = Path("data/processed/centerline_from_shp.geojson")
+    if dxf_geojson.exists():
+        return dxf_geojson
     if excel_geojson.exists():
         return excel_geojson
     if shp_geojson.exists():
         return shp_geojson
     raise FileNotFoundError(
         "No processed centerline GeoJSON found. Expected "
-        "data/processed/centerline_from_excel.geojson or centerline_from_shp.geojson."
+        "data/processed/centerline_from_dxf.geojson, "
+        "data/processed/centerline_from_excel.geojson, "
+        "or data/processed/centerline_from_shp.geojson."
     )
+
+
+def _infer_dxf_from_dwg(contour_dwg: Path | None) -> Path | None:
+    if contour_dwg is None:
+        return None
+    try:
+        dwg = Path(contour_dwg)
+    except Exception:
+        return None
+    if not dwg.name:
+        return None
+    dxf = dwg.with_suffix(".dxf")
+    return dxf
 
 
 def _prepare_xs_geometry_input() -> Path:

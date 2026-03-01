@@ -53,9 +53,11 @@ def stage_inputs_from_source(
 
 
 def _expected_paths(config: ProjectConfig) -> list[Path | None]:
+    contour_dxf = _infer_dxf_from_dwg(config.files.contour_dwg)
     return [
         config.files.contour_pdf,
         config.files.contour_dwg,
+        contour_dxf,
         config.files.info_xlsx,
         config.files.terrain_tif,
         config.files.projection_prj,
@@ -64,6 +66,18 @@ def _expected_paths(config: ProjectConfig) -> list[Path | None]:
         config.kmz_points.chainage0_right_bank_floodplain,
         config.kmz_points.chainage0_right_bank_top,
     ]
+
+
+def _infer_dxf_from_dwg(contour_dwg: Path | None) -> Path | None:
+    if contour_dwg is None:
+        return None
+    try:
+        dwg = Path(contour_dwg)
+    except Exception:
+        return None
+    if not dwg.name:
+        return None
+    return dwg.with_suffix(".dxf")
 
 
 def _find_by_name(source_dir: Path, filename: str) -> Path | None:
