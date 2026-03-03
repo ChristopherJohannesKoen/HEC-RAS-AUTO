@@ -285,6 +285,7 @@ def analyze(
         section_csv,
         run_id=run_id,
         target_epsg=cfg.project.target_crs_epsg,
+        profile_values_csv=profile_csv if profile_csv.exists() else None,
     )
     dxf = export_floodline_dxf(floodline, run_id=run_id)
 
