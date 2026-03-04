@@ -10,6 +10,21 @@ autopilot:
     fixed_multiplier: 1.15
     sweep_enabled: false
     sweep_values: [1.1, 1.15, 1.2]
+    tier_mode_enabled: true
+    primary_tier: "average"
+    tiers:
+      - tier_id: "lenient"
+        label: "Lenient"
+        flow_multiplier_upstream: 1.15
+        flow_multiplier_tributary: 1.15
+      - tier_id: "average"
+        label: "Average"
+        flow_multiplier_upstream: 1.30
+        flow_multiplier_tributary: 1.30
+      - tier_id: "conservative"
+        label: "Conservative"
+        flow_multiplier_upstream: 1.60
+        flow_multiplier_tributary: 1.60
   stop_on:
     - "geometry_qa_error"
     - "hecras_compute_failure"

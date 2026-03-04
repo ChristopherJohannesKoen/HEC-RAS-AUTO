@@ -7,11 +7,22 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+class Scenario2TierConfig(BaseModel):
+    tier_id: str
+    flow_multiplier_upstream: float
+    flow_multiplier_tributary: float
+    label: str = ""
+    rationale: str = ""
+
+
 class Scenario2SweepConfig(BaseModel):
     enabled: bool = False
     fixed_multiplier: float = 1.15
     sweep_enabled: bool = False
     sweep_values: list[float] = Field(default_factory=lambda: [1.1, 1.15, 1.2])
+    tier_mode_enabled: bool = False
+    primary_tier: str = "average"
+    tiers: list[Scenario2TierConfig] = Field(default_factory=list)
 
 
 class AutomationPolicy(BaseModel):

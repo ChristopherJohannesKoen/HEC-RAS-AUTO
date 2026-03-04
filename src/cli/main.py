@@ -59,8 +59,9 @@ from src.ras.sdf_writer import write_rasimport_sdf
 from src.post.cad_export import export_floodline_dxf
 from src.reporting.report_builder import build_report
 from src.reporting.ai_word_report import build_ai_word_report
+from src.reporting.scenario2_triad_report import build_scenario2_triad_report
 from src.reporting.submission_pack import build_submission_pack
-from src.scenarios.scenario_compare import compare_runs
+from src.scenarios.scenario_compare import compare_runs, compare_scenario2_tiers
 from src.scenarios.scenario_loader import load_scenario
 from src.scenarios.scenario_registry import build_scenario_spec
 from src.xs.reach_lengths import assign_reach_lengths, write_reach_lengths
@@ -280,13 +281,13 @@ def analyze(
         signal_summary_csv=signal_csv,
     )
     profile_png = build_longitudinal_profile(section_csv, run_id=run_id)
-    metrics_csv = compute_metrics(section_csv, run_id=run_id)
     floodline = export_energy_floodline(
         section_csv,
         run_id=run_id,
         target_epsg=cfg.project.target_crs_epsg,
         profile_values_csv=profile_csv if profile_csv.exists() else None,
     )
+    metrics_csv = compute_metrics(section_csv, run_id=run_id, floodline_geojson=floodline)
     dxf = export_floodline_dxf(floodline, run_id=run_id)
 
     artifact_json = Path("outputs") / run_id / "artifacts" / "run_artifacts.json"
@@ -540,21 +541,24 @@ def autopilot(
 
         if scenario2 and policy.scenario2.enabled:
             scenario_path = Path("config/scenarios/scenario_2_climate.yml")
-            sweep_vals = []
-            if sweep.strip():
-                sweep_vals = [float(x.strip()) for x in sweep.split(",") if x.strip()]
-            elif policy.scenario2.sweep_enabled:
-                sweep_vals = [float(x) for x in policy.scenario2.sweep_values]
-            if sweep_vals:
-                sweep_ids: list[str] = []
-                for idx, mult in enumerate(sweep_vals, start=1):
-                    sid = f"{run_id}_scenario_2_{idx}"
-                    sweep_ids.append(sid)
+            profile_cfg = Path("config/scenarios/scenario_2_climate_profiles.yml")
+            tier_defs = _resolve_scenario2_tiers(policy=policy, profile_config=profile_cfg, sweep=sweep)
+            if tier_defs:
+                tier_runs: dict[str, str] = {}
+                for tier in tier_defs:
+                    tid = str(tier["tier_id"])
+                    sid = _scenario2_tier_run_id(run_id, tid)
+                    tier_runs[tid] = sid
                     apply_scenario_with_multiplier(
                         run_id=sid,
                         scenario_path=scenario_path,
                         config_path=config,
-                        multiplier=mult,
+                        multiplier=float(tier["flow_multiplier_upstream"]),
+                        tributary_multiplier=float(tier["flow_multiplier_tributary"]),
+                        tier_id=tid,
+                        tier_label=str(tier.get("label", tid.title())),
+                        rationale=str(tier.get("rationale", "")),
+                        references=[str(x) for x in tier.get("references", []) if str(x).strip()],
                     )
                     prepare_run(run_id=sid, config=config)
                     run_hecras(
@@ -566,15 +570,26 @@ def autopilot(
                     import_results(run_id=sid)
                     analyze(run_id=sid, config=config, thresholds=thresholds)
                     _enforce_real_hydraulics(run_id=sid, strict=strict)
-                compare(base=run_id, other=f"{run_id}_scenario_2_{len(sweep_vals)}")
-                _write_sweep_envelope(base_run=run_id, scenario_runs=sweep_ids)
+                    compare(base=run_id, other=sid)
+                    build_report_cmd(run_id=sid)
+
+                if len(tier_runs) > 1:
+                    compare_scenario2_tiers(base_run=run_id, tier_runs=tier_runs)
+                    triad_report = build_scenario2_triad_report(
+                        base_run_id=run_id,
+                        tier_runs=tier_runs,
+                        profile_config=profile_cfg,
+                    )
+                    typer.echo(f"Scenario 2 triad report: {triad_report}")
             else:
-                sid = f"{run_id}_scenario_2"
+                sid = _scenario2_tier_run_id(run_id, "average")
                 apply_scenario_with_multiplier(
                     run_id=sid,
                     scenario_path=scenario_path,
                     config_path=config,
                     multiplier=float(policy.scenario2.fixed_multiplier),
+                    tier_id="average",
+                    tier_label="Average",
                 )
                 prepare_run(run_id=sid, config=config)
                 run_hecras(
@@ -1023,6 +1038,11 @@ def apply_scenario_with_multiplier(
     scenario_path: Path,
     config_path: Path,
     multiplier: float,
+    tributary_multiplier: float | None = None,
+    tier_id: str = "",
+    tier_label: str = "",
+    rationale: str = "",
+    references: list[str] | None = None,
 ) -> None:
     from src.common.config import load_yaml
     import yaml
@@ -1030,16 +1050,142 @@ def apply_scenario_with_multiplier(
     cfg = load_project_config(config_path)
     data = load_yaml(scenario_path)
     data["scenario_id"] = run_id
-    data["title"] = f"Climate Intensification x{multiplier:.2f}"
-    data["flow_multiplier_upstream"] = multiplier
-    data["flow_multiplier_tributary"] = multiplier
+    up_mult = float(multiplier)
+    tr_mult = float(tributary_multiplier if tributary_multiplier is not None else multiplier)
+    suffix = f" ({tier_label})" if tier_label else ""
+    data["title"] = f"Climate Intensification x{up_mult:.2f}{suffix}"
+    data["flow_multiplier_upstream"] = up_mult
+    data["flow_multiplier_tributary"] = tr_mult
+    if rationale:
+        data["rationale"] = rationale
+    if references:
+        data["references"] = [str(x) for x in references if str(x).strip()]
     tmp = Path("runs") / run_id / "scenario_runtime.yml"
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(yaml.safe_dump(data), encoding="utf-8")
     spec = load_scenario(tmp)
     flow_json, flow_csv = write_steady_flow_payload(cfg.hydraulics, run_id=run_id, scenario=spec)
+    metadata = {
+        "scenario_id": "scenario_2",
+        "run_id": run_id,
+        "tier_id": tier_id,
+        "tier_label": tier_label,
+        "flow_multiplier_upstream": up_mult,
+        "flow_multiplier_tributary": tr_mult,
+        "rationale": str(data.get("rationale", "")).strip(),
+        "references": list(data.get("references", [])) if isinstance(data.get("references", []), list) else [],
+    }
+    meta_path = Path("runs") / run_id / "flow" / "scenario_metadata.json"
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     typer.echo(f"Scenario payload written: {flow_json}")
     typer.echo(f"Scenario table: {flow_csv}")
+
+
+def _scenario2_tier_run_id(base_run: str, tier_id: str) -> str:
+    clean = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in tier_id.strip().lower())
+    clean = clean.replace("-", "_")
+    return f"{base_run}_scenario_2_{clean}"
+
+
+def _resolve_scenario2_tiers(
+    policy,
+    profile_config: Path,
+    sweep: str = "",
+) -> list[dict[str, object]]:
+    profile = _load_scenario2_profile(profile_config)
+    refs = _scenario2_reference_urls(profile.get("references", []))
+    base_rationale = str(profile.get("physical_mechanism", "")).strip()
+
+    if sweep.strip():
+        vals = [float(x.strip()) for x in sweep.split(",") if x.strip()]
+        return [
+            {
+                "tier_id": f"sweep_{i}",
+                "label": f"Sweep {i}",
+                "flow_multiplier_upstream": float(v),
+                "flow_multiplier_tributary": float(v),
+                "rationale": base_rationale,
+                "references": refs,
+            }
+            for i, v in enumerate(vals, start=1)
+        ]
+
+    if bool(getattr(policy.scenario2, "tier_mode_enabled", False)):
+        tier_cfg = list(getattr(policy.scenario2, "tiers", []))
+        if not tier_cfg:
+            tier_cfg = []
+        order = [str(x).strip().lower() for x in profile.get("tier_order", []) if str(x).strip()]
+        tmp: dict[str, dict[str, object]] = {}
+        for t in tier_cfg:
+            tid = str(getattr(t, "tier_id", "")).strip().lower()
+            if not tid:
+                continue
+            tmp[tid] = {
+                "tier_id": tid,
+                "label": str(getattr(t, "label", "")).strip() or tid.title(),
+                "flow_multiplier_upstream": float(getattr(t, "flow_multiplier_upstream", 1.0)),
+                "flow_multiplier_tributary": float(getattr(t, "flow_multiplier_tributary", 1.0)),
+                "rationale": str(getattr(t, "rationale", "")).strip() or base_rationale,
+                "references": refs,
+            }
+        ordered: list[dict[str, object]] = []
+        if order:
+            for tid in order:
+                if tid in tmp:
+                    ordered.append(tmp.pop(tid))
+        ordered.extend(tmp.values())
+        if ordered:
+            return ordered
+
+    if bool(getattr(policy.scenario2, "sweep_enabled", False)):
+        return [
+            {
+                "tier_id": f"sweep_{i}",
+                "label": f"Sweep {i}",
+                "flow_multiplier_upstream": float(v),
+                "flow_multiplier_tributary": float(v),
+                "rationale": base_rationale,
+                "references": refs,
+            }
+            for i, v in enumerate(getattr(policy.scenario2, "sweep_values", []), start=1)
+        ]
+
+    return [
+        {
+            "tier_id": "average",
+            "label": "Average",
+            "flow_multiplier_upstream": float(getattr(policy.scenario2, "fixed_multiplier", 1.15)),
+            "flow_multiplier_tributary": float(getattr(policy.scenario2, "fixed_multiplier", 1.15)),
+            "rationale": base_rationale,
+            "references": refs,
+        }
+    ]
+
+
+def _load_scenario2_profile(path: Path) -> dict[str, object]:
+    from src.common.config import load_yaml
+
+    if not path.exists():
+        return {}
+    data = load_yaml(path)
+    return data if isinstance(data, dict) else {}
+
+
+def _scenario2_reference_urls(refs: object) -> list[str]:
+    if not isinstance(refs, list):
+        return []
+    out: list[str] = []
+    for r in refs:
+        if isinstance(r, dict):
+            url = str(r.get("url", "")).strip()
+            if url:
+                out.append(url)
+        else:
+            s = str(r).strip()
+            if s:
+                out.append(s)
+    return out
 
 
 def _enforce_real_hydraulics(run_id: str, strict: bool) -> None:
@@ -1185,6 +1331,20 @@ def _build_agent_action_registry(
         # previous runs (e.g. a stale global "scenario_2" directory lock).
         return f"{run_id}_{scenario_id}"
 
+    def _scenario2_context() -> tuple[list[dict[str, object]], dict[str, str], str]:
+        policy = load_automation_config(automation).autopilot
+        tiers = _resolve_scenario2_tiers(
+            policy=policy,
+            profile_config=Path("config/scenarios/scenario_2_climate_profiles.yml"),
+            sweep="",
+        )
+        tier_runs = {str(t["tier_id"]): _scenario2_tier_run_id(run_id, str(t["tier_id"])) for t in tiers}
+        primary_tier = str(getattr(policy.scenario2, "primary_tier", "average")).strip().lower() or "average"
+        if primary_tier not in tier_runs and tier_runs:
+            primary_tier = list(tier_runs.keys())[0]
+        primary_run = tier_runs.get(primary_tier, "")
+        return tiers, tier_runs, primary_run
+
     def run_baseline_autopilot(_inputs: dict) -> dict:
         autopilot(
             source=source,
@@ -1202,26 +1362,46 @@ def _build_agent_action_registry(
 
     def prepare_assigned_scenario_payload(inputs: dict) -> dict:
         scenario_id = str(inputs["scenario_id"])
-        sid = _scenario_run_id(scenario_id)
-        climate_mult = 1.15
         if scenario_id == "scenario_2":
-            climate_mult = float(
-                prompt_spec.constraints.get(
-                    "scenario_2_multiplier",
-                    load_automation_config(automation).autopilot.scenario2.fixed_multiplier,
+            tiers, tier_runs, primary_run = _scenario2_context()
+            for t in tiers:
+                tid = str(t["tier_id"])
+                sid = tier_runs[tid]
+                apply_scenario_with_multiplier(
+                    run_id=sid,
+                    scenario_path=Path("config/scenarios/scenario_2_climate.yml"),
+                    config_path=config,
+                    multiplier=float(t["flow_multiplier_upstream"]),
+                    tributary_multiplier=float(t["flow_multiplier_tributary"]),
+                    tier_id=tid,
+                    tier_label=str(t.get("label", tid.title())),
+                    rationale=str(t.get("rationale", "")),
+                    references=[str(x) for x in t.get("references", []) if str(x).strip()],
                 )
-            )
-        spec = build_scenario_spec(scenario_id, climate_multiplier=climate_mult)
+            return {
+                "scenario_runs": tier_runs,
+                "primary_scenario_run": primary_run,
+            }
+
+        sid = _scenario_run_id(scenario_id)
+        spec = build_scenario_spec(scenario_id, climate_multiplier=1.15)
         cfg = load_project_config(config)
         flow_json, flow_csv = write_steady_flow_payload(cfg.hydraulics, run_id=sid, scenario=spec)
-        return {
-            "scenario_run": sid,
-            "scenario_flow_json": str(flow_json),
-            "scenario_flow_csv": str(flow_csv),
-        }
+        return {"scenario_run": sid, "scenario_flow_json": str(flow_json), "scenario_flow_csv": str(flow_csv)}
 
     def execute_assigned_scenario(inputs: dict) -> dict:
         scenario_id = str(inputs["scenario_id"])
+        if scenario_id == "scenario_2":
+            _, tier_runs, primary_run = _scenario2_context()
+            for sid in tier_runs.values():
+                prepare_run(run_id=sid, config=config)
+                run_hecras(run_id=sid, config=config, strict=strict, auto_close_instances=True)
+                import_results(run_id=sid)
+                analyze(run_id=sid, config=config, thresholds=thresholds)
+                _enforce_real_hydraulics(run_id=sid, strict=strict)
+                build_report_cmd(run_id=sid)
+            return {"scenario_runs": tier_runs, "primary_scenario_run": primary_run}
+
         sid = _scenario_run_id(scenario_id)
         prepare_run(run_id=sid, config=config)
         run_hecras(run_id=sid, config=config, strict=strict, auto_close_instances=True)
@@ -1233,6 +1413,27 @@ def _build_agent_action_registry(
 
     def compare_baseline_scenario(inputs: dict) -> dict:
         scenario_id = str(inputs["scenario_id"])
+        if scenario_id == "scenario_2":
+            _, tier_runs, _ = _scenario2_context()
+            per_tier_tables: dict[str, str] = {}
+            per_tier_profiles: dict[str, str] = {}
+            for tier, sid in tier_runs.items():
+                table, profile = compare_runs(run_id, sid)
+                per_tier_tables[tier] = str(table)
+                per_tier_profiles[tier] = str(profile)
+            triad = compare_scenario2_tiers(base_run=run_id, tier_runs=tier_runs)
+            triad_report = build_scenario2_triad_report(
+                base_run_id=run_id,
+                tier_runs=tier_runs,
+                profile_config=Path("config/scenarios/scenario_2_climate_profiles.yml"),
+            )
+            return {
+                "comparison_tables": per_tier_tables,
+                "comparison_profiles": per_tier_profiles,
+                "triad_comparison": triad,
+                "triad_report": str(triad_report),
+            }
+
         sid = _scenario_run_id(scenario_id)
         table, profile = compare_runs(run_id, sid)
         return {"comparison_table": str(table), "comparison_profile": str(profile)}
@@ -1240,6 +1441,9 @@ def _build_agent_action_registry(
     def collect_citations(inputs: dict) -> dict:
         scenario_id = str(inputs["scenario_id"])
         sid = _scenario_run_id(scenario_id)
+        if scenario_id == "scenario_2":
+            _, _, primary = _scenario2_context()
+            sid = primary or sid
         objective = str(inputs.get("objective", "Hydraulic interpretation for scenario analysis."))
         retriever = WebCitationRetriever(ai_cfg, retrieval_cfg)
         claims = [
@@ -1264,12 +1468,39 @@ def _build_agent_action_registry(
 
     def build_submission(inputs: dict) -> dict:
         scenario_id = str(inputs["scenario_id"])
-        sid = _scenario_run_id(scenario_id)
         build_report_cmd(run_id=run_id)
-        build_report_cmd(run_id=sid)
         base_prompt = _load_prompt_text_for_run(run_id) or str(prompt_spec.raw_prompt)
-        scenario_prompt = _load_prompt_text_for_run(sid) or str(prompt_spec.raw_prompt)
         base_word = build_ai_word_report(run_id=run_id, prompt_text=base_prompt, ai_config=ai_cfg)
+
+        if scenario_id == "scenario_2":
+            _, tier_runs, primary = _scenario2_context()
+            for sid in tier_runs.values():
+                build_report_cmd(run_id=sid)
+            build_scenario2_triad_report(
+                base_run_id=run_id,
+                tier_runs=tier_runs,
+                profile_config=Path("config/scenarios/scenario_2_climate_profiles.yml"),
+            )
+            scenario_word = {}
+            if primary:
+                scenario_prompt = _load_prompt_text_for_run(primary) or str(prompt_spec.raw_prompt)
+                scenario_word = build_ai_word_report(run_id=primary, prompt_text=scenario_prompt, ai_config=ai_cfg)
+            manifest = build_submission_pack(
+                base_run_id=run_id,
+                scenario_run_id=primary,
+                scenario_run_ids=list(tier_runs.values()),
+                primary_scenario_run_id=primary,
+            )
+            return {
+                "submission_manifest": str(manifest),
+                "baseline_word_report": base_word.get("docx", ""),
+                "scenario_word_report": scenario_word.get("docx", ""),
+                "scenario_runs": tier_runs,
+            }
+
+        sid = _scenario_run_id(scenario_id)
+        build_report_cmd(run_id=sid)
+        scenario_prompt = _load_prompt_text_for_run(sid) or str(prompt_spec.raw_prompt)
         scenario_word = build_ai_word_report(run_id=sid, prompt_text=scenario_prompt, ai_config=ai_cfg)
         manifest = build_submission_pack(base_run_id=run_id, scenario_run_id=sid)
         return {

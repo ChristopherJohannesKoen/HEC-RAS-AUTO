@@ -2,6 +2,12 @@ scenario_id: "scenario_2"
 title: "Climate Intensification"
 flow_multiplier_upstream: 1.15
 flow_multiplier_tributary: 1.15
-rationale: "Rare-event flow intensification under projected climate signal."
+rationale: >
+  Scenario 2 represents climate-intensification forcing by scaling baseline 1:100-year peak
+  discharges while keeping geometry and Manning roughness unchanged.
 references:
-  - "[VERIFY] Add local Western Cape climate projection source."
+  - "https://www.ipcc.ch/report/ar6/wg1/chapter/chapter-8/"
+  - "https://www.ipcc.ch/report/ar6/wg1/chapter/chapter-11/"
+  - "https://repository.up.ac.za/bitstream/handle/2263/88622/McBride_Changes_2022.pdf?sequence=1"
+  - "https://www.wrc.org.za/wp-content/uploads/mdocs/TT%20921%20final%20web.pdf"
+  - "https://www.dws.gov.za/iwrp/uMkhomazi/Documents/Module%201/2/P%20WMA%2011_U10_00_3312_3_1_11%20-%20Climate%20Change_FINAL.pdf"

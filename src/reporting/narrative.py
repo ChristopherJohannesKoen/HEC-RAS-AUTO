@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 
@@ -24,10 +25,16 @@ def build_qa_status(run_id: str, outputs_root: Path = Path("outputs")) -> str:
 
 
 def scenario_notes(run_id: str) -> str:
-    if run_id.startswith("scenario_2"):
+    if run_id.startswith("scenario_2") or "_scenario_2" in run_id:
+        metadata = _load_scenario_metadata(run_id)
+        tier = str(metadata.get("tier_id", "")).strip()
+        tier_text = f" Tier `{tier}`." if tier else ""
         return (
-            "Scenario 2 applies explicit multipliers to upstream and tributary 1:100-year flows.\n"
-            "[VERIFY] Confirm multiplier values against selected climate projection source."
+            "Scenario 2 applies explicit multipliers to upstream and tributary 1:100-year flows "
+            "to represent climate intensification forcing only (no geometry/roughness modification)."
+            f"{tier_text}\n"
+            "Recommended interpretation: evaluate max WSE, max velocity, max energy, and flood-extent "
+            "change relative to baseline and discuss confluence response near chainage 1500 m."
         )
     if run_id.startswith("scenario_1"):
         return (
@@ -45,3 +52,14 @@ def scenario_notes(run_id: str) -> str:
             "[VERIFY][CITE] Confirm literature-supported roughness adjustments."
         )
     return "Baseline case. No scenario flow multipliers applied."
+
+
+def _load_scenario_metadata(run_id: str) -> dict[str, object]:
+    path = Path("runs") / run_id / "flow" / "scenario_metadata.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}

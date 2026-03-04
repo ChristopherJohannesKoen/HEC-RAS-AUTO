@@ -47,6 +47,11 @@ class PromptCompiler:
         scenario_id = spec.assigned_scenario.lower()
         if scenario_id not in {"scenario_1", "scenario_2", "scenario_3", "scenario_4"}:
             scenario_id = "scenario_2"
+        scenario_run_hint = f"{run_id}_{scenario_id}"
+        scenario_compare_hint = f"outputs/{scenario_run_hint}/comparison/comparison_table.csv"
+        if scenario_id == "scenario_2":
+            scenario_run_hint = f"{run_id}_scenario_2_average"
+            scenario_compare_hint = f"outputs/{run_id}/comparison/scenario2_tier_comparison.csv"
 
         task_graph = [
             TaskNode(
@@ -60,21 +65,21 @@ class PromptCompiler:
                 node_id="scenario_payload",
                 tool_action="prepare_assigned_scenario_payload",
                 inputs={"base_run_id": run_id, "scenario_id": scenario_id},
-                outputs=[f"runs/{scenario_id}/flow/steady_flow.json"],
+                outputs=[f"runs/{scenario_run_hint}/flow/steady_flow.json"],
                 retry_rule="ingest",
             ),
             TaskNode(
                 node_id="scenario_execute",
                 tool_action="execute_assigned_scenario",
                 inputs={"base_run_id": run_id, "scenario_id": scenario_id},
-                outputs=[f"outputs/{scenario_id}/qa/hydraulic_qa.md"],
+                outputs=[f"outputs/{scenario_run_hint}/qa/hydraulic_qa.md"],
                 retry_rule="run-hecras",
             ),
             TaskNode(
                 node_id="scenario_compare",
                 tool_action="compare_baseline_scenario",
                 inputs={"base_run_id": run_id, "scenario_id": scenario_id},
-                outputs=[f"outputs/{scenario_id}/comparison/comparison_table.csv"],
+                outputs=[scenario_compare_hint],
                 retry_rule="analyze",
             ),
             TaskNode(

@@ -9,7 +9,7 @@ def build_scenario_spec(scenario_id: str, climate_multiplier: float | None = Non
     if sid == "scenario_1":
         return scenario_1_settlement.build_spec()
     if sid == "scenario_2":
-        return scenario_2_climate.build_spec(multiplier=climate_multiplier or 1.15)
+        return scenario_2_climate.build_spec(multiplier=climate_multiplier or 1.30)
     if sid == "scenario_3":
         return scenario_3_tourism.build_spec()
     if sid == "scenario_4":

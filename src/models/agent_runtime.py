@@ -65,6 +65,9 @@ class SubmissionPackManifest(BaseModel):
     run_id: str
     baseline_artifacts: dict[str, str] = Field(default_factory=dict)
     scenario_artifacts: dict[str, str] = Field(default_factory=dict)
+    scenario_runs: dict[str, dict[str, str]] = Field(default_factory=dict)
+    scenario_run_ids: list[str] = Field(default_factory=list)
+    primary_scenario_run_id: str = ""
     comparison_artifacts: dict[str, str] = Field(default_factory=dict)
     report_paths: list[str] = Field(default_factory=list)
     cad_paths: list[str] = Field(default_factory=list)

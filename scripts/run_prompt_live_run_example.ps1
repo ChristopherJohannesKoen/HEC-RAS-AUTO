@@ -3,6 +3,7 @@ param(
     [string]$AssignedScenario = "scenario_2",
     [string]$Source = "ref",
     [string]$PromptFile = "prompts/meerlustkloof_assignment_prompt.txt",
+    [string[]]$Scenario2Tiers = @("lenient", "average", "conservative"),
     [switch]$SkipWordReports
 )
 
@@ -17,7 +18,11 @@ if (-not $env:OPENAI_API_KEY -or $env:OPENAI_API_KEY -eq "YOUR_OPENAI_API_KEY") 
 }
 
 $prompt = Get-Content -Path $PromptFile -Raw
-$scenarioRunId = "${RunId}_${AssignedScenario}"
+$scenarioRunId = "${RunId}_${AssignedScenario}_average"
+$scenarioTierRunIds = @()
+foreach ($tier in $Scenario2Tiers) {
+    $scenarioTierRunIds += "${RunId}_${AssignedScenario}_${tier}"
+}
 
 ras-auto agent-run `
   --prompt "$prompt" `
@@ -35,8 +40,15 @@ ras-auto agent-run `
 
 if (-not $SkipWordReports) {
     ras-auto build-report --run-id $RunId --ai config/ai.yml --write-word-doc
-    ras-auto build-report --run-id $scenarioRunId --ai config/ai.yml --write-word-doc
+    foreach ($rid in $scenarioTierRunIds) {
+        ras-auto build-report --run-id $rid --ai config/ai.yml --write-word-doc
+    }
 }
 
 Write-Host "Done. Baseline outputs: outputs/$RunId"
-Write-Host "Done. Scenario outputs: outputs/$scenarioRunId"
+Write-Host "Done. Scenario outputs:"
+foreach ($rid in $scenarioTierRunIds) {
+    Write-Host " - outputs/$rid"
+}
+Write-Host "Triad comparison: outputs/$RunId/comparison/scenario2_tier_comparison.csv"
+Write-Host "Triad report: outputs/reports/${RunId}_scenario_2_triad_report_draft.md"
