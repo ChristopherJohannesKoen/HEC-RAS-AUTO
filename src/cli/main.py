@@ -157,9 +157,11 @@ def build_geometry(
     cfg = load_project_config(config)
     th = load_threshold_config(thresholds)
     xs_source = _prepare_xs_geometry_input()
+    centerline_geojson = _resolve_centerline_geojson()
+    dxf_path = _infer_dxf_from_dwg(cfg.files.contour_dwg)
 
     sections_json = build_cross_sections(
-        centerline_geojson=_resolve_centerline_geojson(),
+        centerline_geojson=centerline_geojson,
         xs_csv=xs_source,
         river_name=cfg.project.river_name,
         reach_name=cfg.project.reach_name,
@@ -174,13 +176,20 @@ def build_geometry(
         n_channel=cfg.hydraulics.mannings_channel,
         n_floodplain=cfg.hydraulics.mannings_floodplain,
     )
-    sections = assign_reach_lengths(sections)
+    reach_length_dxf = Path("outputs") / run_id / "qa" / "reach_lengths_bank_paths.dxf"
+    sections = assign_reach_lengths(
+        sections,
+        dxf_path=dxf_path,
+        centerline_geojson=centerline_geojson,
+        debug_path=Path("data/processed/reach_lengths_debug.json"),
+        diagnostic_dxf_path=reach_length_dxf,
+    )
     _write_sections_json(sections, sections_json)
     write_reach_lengths(sections)
 
     qa_issues = run_geometry_qa(
         sections_json,
-        _resolve_centerline_geojson(),
+        centerline_geojson,
         min_sections=th.qa.min_cross_sections,
     )
     qa_dir = Path("outputs") / run_id / "qa"
@@ -190,6 +199,8 @@ def build_geometry(
     if any(issue.severity == "error" for issue in qa_issues):
         raise RuntimeError(f"Geometry QA failed. Inspect report: {qa_path}")
     typer.echo(f"Geometry build complete. QA report: {qa_path}")
+    if reach_length_dxf.exists():
+        typer.echo(f"Reach-length bank-path DXF: {reach_length_dxf}")
 
 
 @app.command("prepare-run")

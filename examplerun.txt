@@ -1,0 +1,25 @@
+$env:OPENAI_API_KEY = "KEY"
+$prompt = @'
+PROMPT
+'@
+
+ras-auto agent-run `
+  --prompt "$prompt" `
+  --source ref `
+  --run-id prompt_live_run `
+  --assigned-scenario scenario_2 `
+  --strict `
+  --config config/project.yml `
+  --sheets config/sheets.yml `
+  --thresholds config/thresholds.yml `
+  --automation config/automation.yml `
+  --ai config/ai.yml `
+  --agent-config config/agent.yml `
+  --retrieval config/retrieval.yml
+
+ras-auto build-report --run-id prompt_live_run --ai config/ai.yml --write-word-doc
+ras-auto build-report --run-id prompt_live_run_scenario_2_lenient --ai config/ai.yml --write-word-doc
+ras-auto build-report --run-id prompt_live_run_scenario_2_average --ai config/ai.yml --write-word-doc
+ras-auto build-report --run-id prompt_live_run_scenario_2_conservative --ai config/ai.yml --write-word-doc
+
+Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
