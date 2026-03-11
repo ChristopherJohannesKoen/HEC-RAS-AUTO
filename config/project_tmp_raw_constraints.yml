@@ -35,7 +35,7 @@ hec_ras:
 bank_boundary_conditions:
   auto_transform_constraints: false
   snap_constrained_points: false
-  enforce_on_chainage_line: true
+  enforce_on_chainage_line: false
   sections:
     - chainage_m: 0.0
       left_bank:

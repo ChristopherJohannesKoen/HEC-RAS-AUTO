@@ -177,12 +177,18 @@ def build_geometry(
         n_floodplain=cfg.hydraulics.mannings_floodplain,
     )
     reach_length_dxf = Path("outputs") / run_id / "qa" / "reach_lengths_bank_paths.dxf"
+    bank_constraints = _bank_endpoint_constraints_from_config(cfg)
+    bank_opts = _bank_endpoint_options_from_config(cfg)
     sections = assign_reach_lengths(
         sections,
         dxf_path=dxf_path,
         centerline_geojson=centerline_geojson,
         debug_path=Path("data/processed/reach_lengths_debug.json"),
         diagnostic_dxf_path=reach_length_dxf,
+        bank_endpoint_constraints=bank_constraints,
+        auto_transform_constraints=bool(bank_opts.get("auto_transform_constraints", False)),
+        snap_constrained_points=bool(bank_opts.get("snap_constrained_points", False)),
+        enforce_constraints_on_cutline=bool(bank_opts.get("enforce_on_chainage_line", True)),
     )
     _write_sections_json(sections, sections_json)
     write_reach_lengths(sections)
@@ -1021,6 +1027,46 @@ def _infer_dxf_from_dwg(contour_dwg: Path | None) -> Path | None:
         return None
     dxf = dwg.with_suffix(".dxf")
     return dxf
+
+
+def _bank_endpoint_constraints_from_config(cfg: object) -> list[dict[str, object]]:
+    constraints: list[dict[str, object]] = []
+    raw = getattr(cfg, "bank_boundary_conditions", None)
+    sections = getattr(raw, "sections", None) if raw is not None else None
+    if not sections:
+        return constraints
+    for sec in sections:
+        try:
+            ch = float(getattr(sec, "chainage_m"))
+            left = getattr(sec, "left_bank")
+            right = getattr(sec, "right_bank")
+            constraints.append(
+                {
+                    "chainage_m": ch,
+                    "left_xy": [float(getattr(left, "x")), float(getattr(left, "y"))],
+                    "right_xy": [float(getattr(right, "x")), float(getattr(right, "y"))],
+                    "left_z": float(getattr(left, "z")) if getattr(left, "z", None) is not None else None,
+                    "right_z": float(getattr(right, "z")) if getattr(right, "z", None) is not None else None,
+                }
+            )
+        except Exception:
+            continue
+    return constraints
+
+
+def _bank_endpoint_options_from_config(cfg: object) -> dict[str, bool]:
+    raw = getattr(cfg, "bank_boundary_conditions", None)
+    if raw is None:
+        return {
+            "auto_transform_constraints": False,
+            "snap_constrained_points": False,
+            "enforce_on_chainage_line": True,
+        }
+    return {
+        "auto_transform_constraints": bool(getattr(raw, "auto_transform_constraints", False)),
+        "snap_constrained_points": bool(getattr(raw, "snap_constrained_points", False)),
+        "enforce_on_chainage_line": bool(getattr(raw, "enforce_on_chainage_line", True)),
+    }
 
 
 def _prepare_xs_geometry_input() -> Path:

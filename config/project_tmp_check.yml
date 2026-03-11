@@ -33,7 +33,7 @@ hec_ras:
   geometry_import_name: "RASImport.sdf"
 
 bank_boundary_conditions:
-  auto_transform_constraints: false
+  auto_transform_constraints: true
   snap_constrained_points: false
   enforce_on_chainage_line: true
   sections:

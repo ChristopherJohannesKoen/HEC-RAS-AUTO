@@ -46,6 +46,10 @@ def assign_reach_lengths(
     centerline_geojson: Path | None = None,
     debug_path: Path | None = None,
     diagnostic_dxf_path: Path | None = None,
+    bank_endpoint_constraints: list[dict[str, object]] | None = None,
+    auto_transform_constraints: bool = False,
+    snap_constrained_points: bool = False,
+    enforce_constraints_on_cutline: bool = True,
 ) -> list[CrossSection]:
     ordered = sorted(sections, key=lambda s: s.chainage_m)
     if not ordered:
@@ -56,11 +60,34 @@ def assign_reach_lengths(
             "method": "dxf_contour_guided_full_path",
             "dxf_path": str(dxf_path),
             "centerline_geojson": str(centerline_geojson),
+            "auto_transform_constraints": bool(auto_transform_constraints),
+            "snap_constrained_points": bool(snap_constrained_points),
+            "enforce_constraints_on_cutline": bool(enforce_constraints_on_cutline),
         }
         try:
             centerline = _load_centerline(centerline_geojson)
             left_anchor = [_bank_point(section, side="left") for section in ordered]
             right_anchor = [_bank_point(section, side="right") for section in ordered]
+            constraint_pre_offset = _infer_constraint_xy_offset_from_dxf_ucs(
+                sections=ordered,
+                left_anchor=left_anchor,
+                right_anchor=right_anchor,
+                constraints=bank_endpoint_constraints,
+                dxf_path=dxf_path,
+            )
+            constraints_applied, constraint_transform, constrained_indices = _apply_bank_endpoint_constraints(
+                sections=ordered,
+                left_anchor=left_anchor,
+                right_anchor=right_anchor,
+                constraints=bank_endpoint_constraints,
+                auto_transform_constraints=auto_transform_constraints,
+                enforce_on_chainage_line=enforce_constraints_on_cutline,
+                constraint_xy_offset=(
+                    (float(constraint_pre_offset["dx"]), float(constraint_pre_offset["dy"]))
+                    if constraint_pre_offset is not None
+                    else None
+                ),
+            )
             all_bank_points = left_anchor + right_anchor
 
             bank_dists = [centerline.distance(p) for p in all_bank_points]
@@ -76,17 +103,27 @@ def assign_reach_lengths(
             debug_payload["contour_candidate_count"] = len(contour_lines)
             debug_payload["corridor_radius_m"] = corridor_radius_m
             debug_payload["snap_max_dist_m"] = snap_max_dist_m
+            if constraints_applied:
+                debug_payload["bank_endpoint_constraints_applied"] = constraints_applied
+            if constraint_pre_offset is not None:
+                debug_payload["bank_endpoint_constraint_pre_offset"] = constraint_pre_offset
+            if constraint_transform is not None:
+                debug_payload["bank_endpoint_constraint_transform"] = constraint_transform
 
             if contour_lines:
                 left_route = _route_bank_along_contours(
                     anchor_points=left_anchor,
                     contour_lines=contour_lines,
                     snap_max_dist_m=snap_max_dist_m,
+                    fixed_indices=constrained_indices,
+                    snap_fixed_points=snap_constrained_points,
                 )
                 right_route = _route_bank_along_contours(
                     anchor_points=right_anchor,
                     contour_lines=contour_lines,
                     snap_max_dist_m=snap_max_dist_m,
+                    fixed_indices=constrained_indices,
+                    snap_fixed_points=snap_constrained_points,
                 )
                 _assign_lengths_from_segments(
                     sections=ordered,
@@ -167,6 +204,8 @@ def _route_bank_along_contours(
     anchor_points: list[Point],
     contour_lines: list[LineString],
     snap_max_dist_m: float,
+    fixed_indices: set[int] | None = None,
+    snap_fixed_points: bool = False,
 ) -> _BankRouteResult:
     n = len(anchor_points)
     if n == 0:
@@ -176,7 +215,12 @@ def _route_bank_along_contours(
 
     snapped_points: list[Point] = []
     snap_distances: list[float] = []
-    for point in anchor_points:
+    fixed = fixed_indices or set()
+    for i, point in enumerate(anchor_points):
+        if i in fixed and not snap_fixed_points:
+            snapped_points.append(point)
+            snap_distances.append(float("nan"))
+            continue
         snap_point, snap_dist = _nearest_projection_to_contours(point, contour_lines)
         if math.isfinite(snap_dist) and snap_dist <= snap_max_dist_m:
             snapped_points.append(snap_point)
@@ -422,6 +466,143 @@ def _merge_segment_geometries(segments: list[LineString]) -> LineString | None:
     return LineString(merged)
 
 
+def _apply_bank_endpoint_constraints(
+    sections: list[CrossSection],
+    left_anchor: list[Point],
+    right_anchor: list[Point],
+    constraints: list[dict[str, object]] | None,
+    auto_transform_constraints: bool,
+    enforce_on_chainage_line: bool,
+    constraint_xy_offset: tuple[float, float] | None = None,
+) -> tuple[list[dict[str, object]], dict[str, object] | None, set[int]]:
+    if not constraints:
+        return [], None, set()
+    if not sections or len(left_anchor) != len(sections) or len(right_anchor) != len(sections):
+        return [], None, set()
+
+    applied: list[dict[str, object]] = []
+    staged: list[dict[str, object]] = []
+    constrained_indices: set[int] = set()
+    dx = float(constraint_xy_offset[0]) if constraint_xy_offset is not None else 0.0
+    dy = float(constraint_xy_offset[1]) if constraint_xy_offset is not None else 0.0
+    for item in constraints:
+        try:
+            target_chainage = float(item.get("chainage_m"))  # type: ignore[arg-type]
+            left_xy = item.get("left_xy")  # type: ignore[assignment]
+            right_xy = item.get("right_xy")  # type: ignore[assignment]
+            if not isinstance(left_xy, (list, tuple)) or len(left_xy) < 2:
+                continue
+            if not isinstance(right_xy, (list, tuple)) or len(right_xy) < 2:
+                continue
+            idx = min(range(len(sections)), key=lambda i: abs(float(sections[i].chainage_m) - target_chainage))
+            nearest_chainage = float(sections[idx].chainage_m)
+            constrained_indices.add(idx)
+            left_raw = [float(left_xy[0]), float(left_xy[1])]
+            right_raw = [float(right_xy[0]), float(right_xy[1])]
+            staged.append(
+                {
+                    "target_chainage_m": target_chainage,
+                    "matched_chainage_m": nearest_chainage,
+                    "section_index": int(idx),
+                    "left_xy_input": [left_raw[0], left_raw[1]],
+                    "right_xy_input": [right_raw[0], right_raw[1]],
+                    "left_xy_raw": [left_raw[0] + dx, left_raw[1] + dy],
+                    "right_xy_raw": [right_raw[0] + dx, right_raw[1] + dy],
+                    "left_z": _finite_or_none(float(item.get("left_z"))) if item.get("left_z") is not None else None,
+                    "right_z": _finite_or_none(float(item.get("right_z"))) if item.get("right_z") is not None else None,
+                    "pre_offset_applied": constraint_xy_offset is not None,
+                    "pre_offset_dx": dx if constraint_xy_offset is not None else 0.0,
+                    "pre_offset_dy": dy if constraint_xy_offset is not None else 0.0,
+                }
+            )
+        except Exception:
+            continue
+
+    transform_meta: dict[str, object] | None = None
+    apply_transform = False
+    if auto_transform_constraints and len(staged) >= 2:
+        src_points: list[tuple[float, float]] = []
+        dst_points: list[tuple[float, float]] = []
+        for row in staged:
+            idx = int(row["section_index"])
+            src_points.append((float(row["left_xy_raw"][0]), float(row["left_xy_raw"][1])))
+            src_points.append((float(row["right_xy_raw"][0]), float(row["right_xy_raw"][1])))
+            dst_points.append((float(left_anchor[idx].x), float(left_anchor[idx].y)))
+            dst_points.append((float(right_anchor[idx].x), float(right_anchor[idx].y)))
+        fit = _similarity_fit_2d(src_points, dst_points)
+        if fit is not None:
+            direct_rmse = _rmse_2d(src_points, dst_points)
+            fit_rmse = float(fit["rmse"])
+            if direct_rmse > 250.0 and fit_rmse < 120.0 and fit_rmse < 0.45 * max(direct_rmse, 1e-9):
+                apply_transform = True
+                transform_meta = {
+                    "applied": True,
+                    "reason": "constraint_points_not_in_model_frame",
+                    "direct_rmse_m": direct_rmse,
+                    "fit_rmse_m": fit_rmse,
+                    "scale": float(fit["scale"]),
+                    "rotation_deg": float(fit["rotation_deg"]),
+                    "tx": float(fit["tx"]),
+                    "ty": float(fit["ty"]),
+                }
+            else:
+                transform_meta = {
+                    "applied": False,
+                    "direct_rmse_m": direct_rmse,
+                    "fit_rmse_m": fit_rmse,
+                    "scale": float(fit["scale"]),
+                    "rotation_deg": float(fit["rotation_deg"]),
+                    "tx": float(fit["tx"]),
+                    "ty": float(fit["ty"]),
+                }
+
+    for row in staged:
+        idx = int(row["section_index"])
+        lx, ly = float(row["left_xy_raw"][0]), float(row["left_xy_raw"][1])
+        rx, ry = float(row["right_xy_raw"][0]), float(row["right_xy_raw"][1])
+        cut = sections[idx].cutline
+        if apply_transform and transform_meta is not None:
+            lx, ly = _apply_similarity_point(
+                x=lx,
+                y=ly,
+                scale=float(transform_meta["scale"]),
+                rotation_deg=float(transform_meta["rotation_deg"]),
+                tx=float(transform_meta["tx"]),
+                ty=float(transform_meta["ty"]),
+            )
+            rx, ry = _apply_similarity_point(
+                x=rx,
+                y=ry,
+                scale=float(transform_meta["scale"]),
+                rotation_deg=float(transform_meta["rotation_deg"]),
+                tx=float(transform_meta["tx"]),
+                ty=float(transform_meta["ty"]),
+            )
+        if enforce_on_chainage_line:
+            lx, ly = _project_xy_to_cutline((lx, ly), sections[idx].cutline)
+            rx, ry = _project_xy_to_cutline((rx, ry), sections[idx].cutline)
+            l_t = _cutline_t((lx, ly), cut)
+            r_t = _cutline_t((rx, ry), cut)
+            if abs(l_t - r_t) < 0.01:
+                l_def_t = _cutline_t((left_anchor[idx].x, left_anchor[idx].y), cut)
+                r_def_t = _cutline_t((right_anchor[idx].x, right_anchor[idx].y), cut)
+                lx, ly = _point_at_cutline_t(cut, l_def_t)
+                rx, ry = _point_at_cutline_t(cut, r_def_t)
+                row["projection_collapsed_adjusted"] = True
+            else:
+                row["projection_collapsed_adjusted"] = False
+        left_anchor[idx] = Point(lx, ly)
+        right_anchor[idx] = Point(rx, ry)
+
+        row["left_xy"] = [float(lx), float(ly)]
+        row["right_xy"] = [float(rx), float(ry)]
+        row["transform_applied"] = bool(apply_transform)
+        row["projected_to_chainage_line"] = bool(enforce_on_chainage_line)
+        applied.append(row)
+
+    return applied, transform_meta, constrained_indices
+
+
 def _assign_chainage_fallback(sections: list[CrossSection]) -> None:
     for i, section in enumerate(sections):
         if i == len(sections) - 1:
@@ -470,6 +651,38 @@ def _sanitize_reach_length(value: float, fallback: float) -> float:
     if fallback > 0.0 and safe > 6.0 * fallback:
         return max(0.0, fallback)
     return safe
+
+
+def _project_xy_to_cutline(xy: tuple[float, float], cutline: list[tuple[float, float]]) -> tuple[float, float]:
+    if len(cutline) < 2:
+        return float(xy[0]), float(xy[1])
+    p = Point(float(xy[0]), float(xy[1]))
+    line = LineString([(float(c[0]), float(c[1])) for c in cutline[:2]])
+    if line.length <= 0.0:
+        return float(xy[0]), float(xy[1])
+    s = float(line.project(p))
+    q = line.interpolate(s)
+    return float(q.x), float(q.y)
+
+
+def _cutline_t(xy: tuple[float, float], cutline: list[tuple[float, float]]) -> float:
+    if len(cutline) < 2:
+        return 0.0
+    line = LineString([(float(c[0]), float(c[1])) for c in cutline[:2]])
+    if line.length <= 0.0:
+        return 0.0
+    s = float(line.project(Point(float(xy[0]), float(xy[1]))))
+    return _clamp(s / float(line.length), 0.0, 1.0)
+
+
+def _point_at_cutline_t(cutline: list[tuple[float, float]], t: float) -> tuple[float, float]:
+    if len(cutline) < 2:
+        return 0.0, 0.0
+    line = LineString([(float(c[0]), float(c[1])) for c in cutline[:2]])
+    if line.length <= 0.0:
+        return float(cutline[0][0]), float(cutline[0][1])
+    q = line.interpolate(_clamp(float(t), 0.0, 1.0) * float(line.length))
+    return float(q.x), float(q.y)
 
 
 def _bank_point(section: CrossSection, side: str) -> Point:
@@ -612,6 +825,185 @@ def _finite_or_none(value: float) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
+def _infer_constraint_xy_offset_from_dxf_ucs(
+    sections: list[CrossSection],
+    left_anchor: list[Point],
+    right_anchor: list[Point],
+    constraints: list[dict[str, object]] | None,
+    dxf_path: Path,
+) -> dict[str, float] | None:
+    if not constraints:
+        return None
+    if not sections or len(left_anchor) != len(sections) or len(right_anchor) != len(sections):
+        return None
+    ucs = _read_dxf_ucs_origin_xy(dxf_path)
+    if ucs is None:
+        return None
+    ox, oy = float(ucs[0]), float(ucs[1])
+    if abs(ox) + abs(oy) < 1e-9:
+        return None
+
+    staged: list[tuple[tuple[float, float], tuple[float, float], int]] = []
+    for item in constraints:
+        try:
+            target_chainage = float(item.get("chainage_m"))  # type: ignore[arg-type]
+            left_xy = item.get("left_xy")  # type: ignore[assignment]
+            right_xy = item.get("right_xy")  # type: ignore[assignment]
+            if not isinstance(left_xy, (list, tuple)) or len(left_xy) < 2:
+                continue
+            if not isinstance(right_xy, (list, tuple)) or len(right_xy) < 2:
+                continue
+            idx = min(range(len(sections)), key=lambda i: abs(float(sections[i].chainage_m) - target_chainage))
+            staged.append(
+                (
+                    (float(left_xy[0]), float(left_xy[1])),
+                    (float(right_xy[0]), float(right_xy[1])),
+                    int(idx),
+                )
+            )
+        except Exception:
+            continue
+    if not staged:
+        return None
+
+    def _rmse(dx: float, dy: float) -> float:
+        errs: list[float] = []
+        for (lx, ly), (rx, ry), idx in staged:
+            errs.append(math.hypot((lx + dx) - float(left_anchor[idx].x), (ly + dy) - float(left_anchor[idx].y)))
+            errs.append(math.hypot((rx + dx) - float(right_anchor[idx].x), (ry + dy) - float(right_anchor[idx].y)))
+        if not errs:
+            return float("inf")
+        return float(math.sqrt(sum(e * e for e in errs) / len(errs)))
+
+    rmse_none = _rmse(0.0, 0.0)
+    rmse_plus = _rmse(ox, oy)
+    rmse_minus = _rmse(-ox, -oy)
+    best_rmse, best_dx, best_dy, best_mode = min(
+        [
+            (rmse_none, 0.0, 0.0, "none"),
+            (rmse_plus, ox, oy, "plus_ucsorg"),
+            (rmse_minus, -ox, -oy, "minus_ucsorg"),
+        ],
+        key=lambda t: t[0],
+    )
+
+    # Only apply offset when it materially improves alignment.
+    if best_mode == "none":
+        return None
+    if not math.isfinite(best_rmse) or not math.isfinite(rmse_none):
+        return None
+    if best_rmse >= (0.45 * max(rmse_none, 1e-9)):
+        return None
+    if (rmse_none - best_rmse) < 80.0:
+        return None
+
+    return {
+        "dx": float(best_dx),
+        "dy": float(best_dy),
+        "ucs_origin_x": ox,
+        "ucs_origin_y": oy,
+        "mode": 1.0 if best_mode == "plus_ucsorg" else -1.0,
+        "rmse_none_m": float(rmse_none),
+        "rmse_best_m": float(best_rmse),
+    }
+
+
+def _read_dxf_ucs_origin_xy(dxf_path: Path) -> tuple[float, float] | None:
+    try:
+        import ezdxf
+    except Exception:
+        return None
+    try:
+        doc = ezdxf.readfile(str(dxf_path))
+        hdr = doc.header
+        raw = hdr.get("$UCSORG")
+        if not raw or len(raw) < 2:
+            return None
+        return float(raw[0]), float(raw[1])
+    except Exception:
+        return None
+
+
+def _similarity_fit_2d(
+    src_points: list[tuple[float, float]],
+    dst_points: list[tuple[float, float]],
+) -> dict[str, float] | None:
+    if len(src_points) != len(dst_points) or len(src_points) < 2:
+        return None
+    n = float(len(src_points))
+    mxs = sum(p[0] for p in src_points) / n
+    mys = sum(p[1] for p in src_points) / n
+    mxd = sum(p[0] for p in dst_points) / n
+    myd = sum(p[1] for p in dst_points) / n
+
+    src_c = [(x - mxs, y - mys) for x, y in src_points]
+    dst_c = [(x - mxd, y - myd) for x, y in dst_points]
+    var_src = sum((x * x + y * y) for x, y in src_c) / n
+    if var_src <= 0:
+        return None
+
+    cxx = sum(dx * sx for (sx, sy), (dx, dy) in zip(src_c, dst_c)) / n
+    cxy = sum(dx * sy for (sx, sy), (dx, dy) in zip(src_c, dst_c)) / n
+    cyx = sum(dy * sx for (sx, sy), (dx, dy) in zip(src_c, dst_c)) / n
+    cyy = sum(dy * sy for (sx, sy), (dx, dy) in zip(src_c, dst_c)) / n
+
+    # 2x2 SVD via numpy for robustness
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    cov = np.array([[cxx, cxy], [cyx, cyy]], dtype=float)
+    u, svals, vt = np.linalg.svd(cov)
+    d = np.eye(2)
+    if np.linalg.det(u) * np.linalg.det(vt) < 0:
+        d[-1, -1] = -1.0
+    r = u @ d @ vt
+    scale = float(np.trace(np.diag(svals) @ d) / var_src)
+    tx = float(mxd - scale * (r[0, 0] * mxs + r[0, 1] * mys))
+    ty = float(myd - scale * (r[1, 0] * mxs + r[1, 1] * mys))
+    theta = float(math.degrees(math.atan2(r[1, 0], r[0, 0])))
+
+    pred = [ _apply_similarity_point(x, y, scale, theta, tx, ty) for x, y in src_points ]
+    rmse = _rmse_2d(pred, dst_points)
+    return {
+        "scale": scale,
+        "rotation_deg": theta,
+        "tx": tx,
+        "ty": ty,
+        "rmse": rmse,
+    }
+
+
+def _apply_similarity_point(
+    x: float,
+    y: float,
+    scale: float,
+    rotation_deg: float,
+    tx: float,
+    ty: float,
+) -> tuple[float, float]:
+    th = math.radians(rotation_deg)
+    c = math.cos(th)
+    s = math.sin(th)
+    xr = scale * (c * x - s * y) + tx
+    yr = scale * (s * x + c * y) + ty
+    return float(xr), float(yr)
+
+
+def _rmse_2d(
+    p: list[tuple[float, float]],
+    q: list[tuple[float, float]],
+) -> float:
+    if not p or len(p) != len(q):
+        return float("inf")
+    se = 0.0
+    for (x1, y1), (x2, y2) in zip(p, q):
+        dx = x1 - x2
+        dy = y1 - y2
+        se += dx * dx + dy * dy
+    return float(math.sqrt(se / len(p)))
+
+
 def _write_reach_length_overlay_dxf(
     source_dxf: Path,
     out_dxf: Path,
@@ -643,6 +1035,7 @@ def _write_reach_length_overlay_dxf(
     try:
         doc = ezdxf.readfile(str(source_dxf))
         msp = doc.modelspace()
+        _force_world_ucs(doc)
     except Exception as exc:
         logger.warning(
             "Failed to open source DXF for overlay (%s). Copying source to %s.",
@@ -687,6 +1080,23 @@ def _write_reach_length_overlay_dxf(
         except Exception as copy_exc:
             logger.warning("Failed to save fallback DXF for %s: %s", out_dxf, copy_exc)
             return False
+
+
+def _force_world_ucs(doc: object) -> None:
+    """Normalize UCS header vars so AutoCAD reads coordinates in WCS."""
+    try:
+        hdr = doc.header
+        hdr["$UCSORG"] = (0.0, 0.0, 0.0)
+        hdr["$UCSXDIR"] = (1.0, 0.0, 0.0)
+        hdr["$UCSYDIR"] = (0.0, 1.0, 0.0)
+        hdr["$UCSNAME"] = ""
+        hdr["$PUCSORG"] = (0.0, 0.0, 0.0)
+        hdr["$PUCSXDIR"] = (1.0, 0.0, 0.0)
+        hdr["$PUCSYDIR"] = (0.0, 1.0, 0.0)
+        hdr["$PUCSNAME"] = ""
+        hdr["$WORLDVIEW"] = 1
+    except Exception:
+        pass
 
 
 def _add_line_to_dxf(msp: object, line: LineString | None, layer: str) -> None:

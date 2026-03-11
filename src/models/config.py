@@ -45,12 +45,32 @@ class HecRasConfig(BaseModel):
     geometry_import_name: str = "RASImport.sdf"
 
 
+class BankBoundaryPoint(BaseModel):
+    x: float
+    y: float
+    z: Optional[float] = None
+
+
+class BankBoundarySection(BaseModel):
+    chainage_m: float
+    left_bank: BankBoundaryPoint
+    right_bank: BankBoundaryPoint
+
+
+class BankBoundaryConditionsConfig(BaseModel):
+    sections: list[BankBoundarySection] = Field(default_factory=list)
+    auto_transform_constraints: bool = False
+    snap_constrained_points: bool = False
+    enforce_on_chainage_line: bool = True
+
+
 class ProjectConfig(BaseModel):
     project: ProjectMeta
     files: FilesConfig
     kmz_points: KmzPointsConfig
     hydraulics: HydraulicsConfig
     hec_ras: HecRasConfig
+    bank_boundary_conditions: Optional[BankBoundaryConditionsConfig] = None
 
 
 class TerrainThresholds(BaseModel):
