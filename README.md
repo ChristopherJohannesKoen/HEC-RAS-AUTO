@@ -1,27 +1,33 @@
 # HEC-RAS-AUTO
 
-Deterministic automation for Meerlustkloof 1D steady HEC-RAS workflows:
+Deterministic + agent-assisted automation for the Meerlustkloof 1D steady HEC-RAS workflow:
 - baseline model build/compute/report
-- scenario re-run and comparison
-- prompt-driven orchestration with optional OpenAI support
+- Scenario 2 climate-intensification triad (`lenient`, `average`, `conservative`)
+- optional OpenAI-assisted narrative report generation
 
-## Platform Requirements
+## Requirements
 
 - Windows 10/11
 - Python 3.11+
 - HEC-RAS 6.6 or 6.7 installed (`Ras.exe`)
 - PowerShell
 
-## Repository Layout (Runtime-Critical)
+## Repository Layout
 
+Runtime source:
 - `src/` application code
-- `config/` run and parsing configuration
+- `config/` run/automation/report configuration
 - `shell/ras_project/` HEC-RAS shell project template
-- `ref/` source input package used by `--source ref`
-- `data/raw/meerlustkloof/` runtime intake target (auto-populated from `ref` by agent/autopilot)
-- `templates/` report templates
+- `scripts/` runnable helper scripts
+- `prompts/` prompt files used by example scripts
+- `ref/` input package used by `--source ref`
+- `data/raw/meerlustkloof/` runtime intake destination (auto-populated from `ref`)
 
-Everything not required for runtime has been moved under `archive/` for cleanup.
+Versioned example output snapshot:
+- `examples/prompt_live_run/` curated baseline + Scenario 2 triad artifacts for quick preview
+
+Generated runtime folders (ignored by git):
+- `outputs/`, `runs/`, `logs/`, `data/processed/*`
 
 ## Setup
 
@@ -32,9 +38,9 @@ pip install -e .[dev]
 ras-auto init
 ```
 
-## Run the Full Meerlustkloof Example
+## Run The Full Example
 
-Use the bundled script (recommended):
+Recommended (scripted):
 
 ```powershell
 $env:OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
@@ -42,15 +48,12 @@ $env:OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
 Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
 ```
 
-The script reads the full assignment prompt from:
+The script uses:
 - `prompts/meerlustkloof_assignment_prompt.txt`
+- `run_id=prompt_live_run`
+- assigned scenario `scenario_2`
 
-And runs:
-- `ras-auto agent-run` for baseline + Scenario 2 triad (`lenient`, `average`, `conservative`)
-- `ras-auto build-report --write-word-doc` for baseline
-- `ras-auto build-report --write-word-doc` for each Scenario 2 tier
-
-## Equivalent Manual Commands
+## Manual Equivalent
 
 ```powershell
 $env:OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
@@ -78,37 +81,34 @@ ras-auto build-report --run-id prompt_live_run_scenario_2_conservative --ai conf
 Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
 ```
 
-## Outputs
+## Output Conventions
 
-Baseline run outputs:
-- `outputs/prompt_live_run/`
-- `outputs/reports/prompt_live_run_report_draft.md`
-- `outputs/reports/prompt_live_run_final_ai_report.md`
-- `outputs/reports/prompt_live_run_final_ai_report.docx`
+Live generated outputs:
+- `outputs/<run_id>/...`
+- `outputs/reports/...`
 
-Scenario outputs:
+Scenario 2 triad outputs:
 - `outputs/prompt_live_run_scenario_2_lenient/`
 - `outputs/prompt_live_run_scenario_2_average/`
 - `outputs/prompt_live_run_scenario_2_conservative/`
-- `outputs/reports/prompt_live_run_scenario_2_lenient_report_draft.md`
-- `outputs/reports/prompt_live_run_scenario_2_average_report_draft.md`
-- `outputs/reports/prompt_live_run_scenario_2_conservative_report_draft.md`
-- `outputs/reports/prompt_live_run_scenario_2_triad_report_draft.md`
 - `outputs/prompt_live_run/comparison/scenario2_tier_comparison.csv`
 - `outputs/prompt_live_run/comparison/scenario2_tier_overlay_profile.png`
 
-Submission bundle:
+Submission manifest:
 - `outputs/prompt_live_run/submission/manifest.json`
+
+Committed sample output preview:
+- `examples/prompt_live_run/`
 
 ## Troubleshooting
 
-- If `agent-run` fails due file locks in `runs/<run_id>/ras_project`, close HEC-RAS and retry:
+- If `agent-run` fails because files are locked in `runs/<run_id>/ras_project`, close HEC-RAS and retry:
   - `ras-auto agent-resume --run-id <run_id> --strict`
-- If no AI report is produced, confirm `OPENAI_API_KEY` is set in the current shell.
-- If `Ras.exe` path is not discovered, set `HEC_RAS_EXE` or edit `config/project.yml`.
+- If AI reports are skipped, confirm `OPENAI_API_KEY` is set in the current shell.
+- If `Ras.exe` is not detected, set `HEC_RAS_EXE` or update `config/project.yml`.
 
 ## Security
 
 - Never commit real API keys.
 - Use environment variables only:
-  - `$env:OPENAI_API_KEY = "..."` for current shell session
+  - `$env:OPENAI_API_KEY = "..."`

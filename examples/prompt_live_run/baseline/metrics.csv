@@ -1,0 +1,2 @@
+run_id,max_wse_m,max_wse_chainage_m,max_energy_level_m,max_energy_chainage_m,max_velocity_mps,max_velocity_chainage_m,flood_extent_area_m2,flood_extent_area_ha,confluence_chainage_m,confluence_note,flood_extent_note
+prompt_live_run,290.2897644042969,0.0,290.9012756347656,0.0,6.019568920135498,1500.0,784728.474308254,78.4728474308254,1500.0,[VERIFY] Interpret local hydraulic effect using HEC-RAS profile and velocity maps.,Flood extent derived from energy_flood_envelope polygon.

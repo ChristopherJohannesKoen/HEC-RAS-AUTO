@@ -2,9 +2,11 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+tmp/
 
 data/immutable_snapshot/
 data/staging/
@@ -26,6 +28,8 @@ archive/
 # local build/runtime artifacts
 *.egg-info/
 pytest-cache-files-*/
+config/project_tmp*.yml
+*.tmp
 HECRASPlotDriverError.txt
 tmp_hec32_test.ps1
 tmp_hec_test.vbs
