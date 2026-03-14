@@ -43,6 +43,7 @@ class HecRasConfig(BaseModel):
     shell_project_dir: Path
     ras_exe_path: Optional[Path] = None
     geometry_import_name: str = "RASImport.sdf"
+    preserve_existing_model_inputs: bool = False
 
 
 class BankBoundaryPoint(BaseModel):

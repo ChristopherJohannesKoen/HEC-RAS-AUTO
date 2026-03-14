@@ -1,0 +1,13 @@
+scenario_id: "scenario_2_conservative"
+title: "Climate Intensification - Conservative"
+flow_multiplier_upstream: 1.60
+flow_multiplier_tributary: 1.60
+rationale: >
+  Scenario 2 conservative tier scales the baseline 1:100-year peak discharges by 60%
+  while preserving the finalized HEC-RAS geometry, roughness, and plan setup.
+references:
+  - "https://www.ipcc.ch/report/ar6/wg1/chapter/chapter-8/"
+  - "https://www.ipcc.ch/report/ar6/wg1/chapter/chapter-11/"
+  - "https://repository.up.ac.za/bitstream/handle/2263/88622/McBride_Changes_2022.pdf?sequence=1"
+  - "https://www.wrc.org.za/wp-content/uploads/mdocs/TT%20921%20final%20web.pdf"
+  - "https://www.dws.gov.za/iwrp/uMkhomazi/Documents/Module%201/2/P%20WMA%2011_U10_00_3312_3_1_11%20-%20Climate%20Change_FINAL.pdf"

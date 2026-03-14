@@ -1,0 +1,21 @@
+Flow Title=Auto Generated 100-year Flow
+Program Version=6.70
+Number of Profiles= 1 
+Profile Names=Q100        
+River Rch & RM=Meerlustkloof,Main            ,3905.000
+     375
+River Rch & RM=Meerlustkloof,Main            ,2405.000
+     550
+Boundary for River Rch & Prof#=Meerlustkloof,Main            , 1 
+Up Type= 3 
+Up Slope=0.0215
+Dn Type= 3 
+Dn Slope=0.00725
+DSS Import StartDate=
+DSS Import StartTime=
+DSS Import EndDate=
+DSS Import EndTime=
+DSS Import GetInterval= 0 
+DSS Import Interval=
+DSS Import GetPeak= 0 
+DSS Import FillOption= 0 

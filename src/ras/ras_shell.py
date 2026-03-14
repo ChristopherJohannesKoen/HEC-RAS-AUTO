@@ -8,7 +8,12 @@ import time
 from pathlib import Path
 
 
-def clone_shell_project(shell_dir: Path, run_id: str, runs_root: Path = Path("runs")) -> Path:
+def clone_shell_project(
+    shell_dir: Path,
+    run_id: str,
+    runs_root: Path = Path("runs"),
+    preserve_project_files: bool = False,
+) -> Path:
     if not shell_dir.exists():
         raise FileNotFoundError(f"Shell project directory does not exist: {shell_dir}")
     run_project_dir = runs_root / run_id / "ras_project"
@@ -16,7 +21,8 @@ def clone_shell_project(shell_dir: Path, run_id: str, runs_root: Path = Path("ru
         _safe_remove_dir(run_project_dir)
     shutil.copytree(shell_dir, run_project_dir)
     _clear_readonly_recursive(run_project_dir)
-    _seed_project_from_previous_run(run_project_dir, previous_run_dir=Path("ref") / "Previous run")
+    if not preserve_project_files:
+        _seed_project_from_previous_run(run_project_dir, previous_run_dir=Path("ref") / "Previous run")
     _clear_readonly_recursive(run_project_dir)
     return run_project_dir
 

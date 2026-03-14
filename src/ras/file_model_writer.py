@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+import re
 
 import geopandas as gpd
 from shapely.geometry import LineString, MultiLineString
@@ -47,6 +48,27 @@ def stage_text_model_files(
         "plan_file": plan_path,
         "project_file": project_path,
     }
+
+
+def stage_steady_flow_into_existing_project(
+    run_project_dir: Path,
+    flow_json: Path,
+    river_name: str,
+    reach_name: str,
+) -> Path:
+    """Overwrite only the active steady-flow file in an existing HEC-RAS project."""
+    project_path = next(run_project_dir.glob("*.prj"), None)
+    if project_path is None:
+        raise FileNotFoundError(f"No HEC-RAS project file found in {run_project_dir}")
+
+    flow_path = _resolve_existing_flow_path(project_path)
+    write_steady_flow_file(
+        flow_json=flow_json,
+        out_path=flow_path,
+        river_name=river_name,
+        reach_name=reach_name,
+    )
+    return flow_path
 
 
 def write_geometry_file(
@@ -207,6 +229,42 @@ def patch_project_file(project_path: Path, plan_file: str, geom_file: str, flow_
     lines = _upsert_key_line(lines, "Geom File", geom_file)
     lines = _upsert_key_line(lines, "Flow File", flow_file)
     project_path.write_text("\n".join(lines) + "\n", encoding="cp1252")
+
+
+def _resolve_existing_flow_path(project_path: Path) -> Path:
+    lines = _read_key_lines(project_path)
+    flow_ref = ""
+    for line in lines:
+        if line.startswith("Flow File="):
+            flow_ref = line.split("=", 1)[1].strip()
+            break
+    if not flow_ref:
+        raise ValueError(f"Project file does not declare Flow File=: {project_path}")
+
+    run_project_dir = project_path.parent
+    direct = run_project_dir / flow_ref
+    if direct.exists():
+        return direct
+
+    ref_lower = flow_ref.lower()
+    if re.fullmatch(r"f\d\d", ref_lower):
+        candidate = run_project_dir / f"{project_path.stem}.{ref_lower}"
+        if candidate.exists():
+            return candidate
+        return candidate
+
+    dotted = run_project_dir / f"{project_path.stem}.{flow_ref}"
+    if dotted.exists():
+        return dotted
+
+    matches = list(run_project_dir.glob(f"*.{flow_ref}"))
+    if len(matches) == 1:
+        return matches[0]
+
+    raise FileNotFoundError(
+        f"Could not resolve active steady-flow file for project {project_path}. "
+        f"Flow File reference was '{flow_ref}'."
+    )
 
 
 def _read_key_lines(path: Path) -> list[str]:

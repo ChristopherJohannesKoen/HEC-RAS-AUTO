@@ -42,7 +42,7 @@ from src.qa.geometry_qa import run_geometry_qa
 from src.qa.hydraulic_qa import run_hydraulic_qa
 from src.qa.regime_recommender import write_regime_recommendation
 from src.ras.flow_writer import write_steady_flow_payload
-from src.ras.file_model_writer import stage_text_model_files
+from src.ras.file_model_writer import stage_steady_flow_into_existing_project, stage_text_model_files
 from src.ras.hdf_reader import (
     discover_hdf_paths,
     extract_hydraulic_signals,
@@ -217,11 +217,32 @@ def prepare_run(
     """Clone shell project, stage SDF import, and write flow payload + manual steps."""
     configure_logging()
     cfg = load_project_config(config)
+    run_project_dir = clone_shell_project(
+        cfg.hec_ras.shell_project_dir,
+        run_id,
+        preserve_project_files=bool(cfg.hec_ras.preserve_existing_model_inputs),
+    )
+    flow_json = Path("runs") / run_id / "flow" / "steady_flow.json"
+    if not flow_json.exists():
+        flow_json, _ = write_steady_flow_payload(cfg.hydraulics, run_id=run_id)
+
+    if cfg.hec_ras.preserve_existing_model_inputs:
+        staged_flow = stage_steady_flow_into_existing_project(
+            run_project_dir=run_project_dir,
+            flow_json=flow_json,
+            river_name=cfg.project.river_name,
+            reach_name=cfg.project.reach_name,
+        )
+        typer.echo(f"Run prepared: {run_id}")
+        typer.echo(f"Existing HEC-RAS model preserved from: {cfg.hec_ras.shell_project_dir}")
+        typer.echo(f"Flow payload: {flow_json}")
+        typer.echo(f"Flow file overwritten in cloned project only: {staged_flow}")
+        return
+
     sections_json = Path("data/processed/cross_sections_final.json")
     if not sections_json.exists():
         raise FileNotFoundError("Missing geometry package: data/processed/cross_sections_final.json")
 
-    run_project_dir = clone_shell_project(cfg.hec_ras.shell_project_dir, run_id)
     sdf_out = Path("runs") / run_id / "RASImport.sdf"
     write_rasimport_sdf(
         sections_json=sections_json,
@@ -230,9 +251,6 @@ def prepare_run(
         reach_name=cfg.project.reach_name,
     )
     staged = stage_import_file(run_project_dir, sdf_out, cfg.hec_ras.geometry_import_name)
-    flow_json = Path("runs") / run_id / "flow" / "steady_flow.json"
-    if not flow_json.exists():
-        flow_json, _ = write_steady_flow_payload(cfg.hydraulics, run_id=run_id)
     staged_text = stage_text_model_files(
         run_project_dir=run_project_dir,
         sections_json=sections_json,
