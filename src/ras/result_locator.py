@@ -12,17 +12,23 @@ def locate_run_results(run_id: str, runs_root: Path = Path("runs")) -> dict[str,
     run_dir = runs_root / run_id / "ras_project"
     if not run_dir.exists():
         raise HECRASRunMissingError(f"Run project directory not found: {run_dir}")
+    result = locate_project_results(run_dir, label=run_id)
+    result["run_id"] = run_id
+    return result
 
-    hdfs_all = sorted(run_dir.rglob("*.hdf"), key=lambda p: p.stat().st_mtime, reverse=True)
-    logs = sorted(run_dir.rglob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
-    plans = sorted(run_dir.glob("*.p[0-9][0-9]"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+def locate_project_results(project_dir: Path, label: str = "project") -> dict[str, str]:
+    project_dir = project_dir.resolve()
+    hdfs_all = sorted(project_dir.rglob("*.hdf"), key=lambda p: p.stat().st_mtime, reverse=True)
+    logs = sorted(project_dir.rglob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    plans = sorted(project_dir.glob("*.p[0-9][0-9]"), key=lambda p: p.stat().st_mtime, reverse=True)
 
     if not plans:
         raise HECRASRunMissingError(
-            f"No plan file (*.p##) found for run '{run_id}'. Compute may not have executed."
+            f"No plan file (*.p##) found for {label!r}. Compute may not have executed."
         )
 
-    latest_plan = plans[0]
+    latest_plan = _pick_active_plan(project_dir, plans) or plans[0]
     plan_id = _plan_id_from_path(latest_plan)
     hdfs = _plan_hdfs_for_id(hdfs_all, plan_id)
     if not hdfs:
@@ -35,16 +41,38 @@ def locate_run_results(run_id: str, runs_root: Path = Path("runs")) -> dict[str,
         geom_hdfs = [p for p in hdfs_all if not _is_plan_result_hdf(p)]
         hint = f" Geometry-like HDFs found: {[p.name for p in geom_hdfs]}" if geom_hdfs else ""
         raise HECRASRunMissingError(
-            f"No plan-result HDF found for run '{run_id}'.{hint}"
+            f"No plan-result HDF found for {label!r}.{hint}"
         )
 
     return {
-        "run_id": run_id,
         "hdf_path": str(hdfs[0]),
         "plan_path": str(latest_plan),
         "log_path": str(logs[0]) if logs else "",
-        "run_project_dir": str(run_dir),
+        "run_project_dir": str(project_dir),
     }
+
+
+def _pick_active_plan(project_dir: Path, plans: list[Path]) -> Path | None:
+    prjs = sorted(project_dir.glob("*.prj"))
+    if not prjs:
+        return None
+    try:
+        text = prjs[0].read_text(encoding="cp1252", errors="ignore")
+    except Exception:
+        return None
+    for line in text.splitlines():
+        if not line.startswith("Current Plan="):
+            continue
+        ref = line.split("=", 1)[1].strip()
+        if not ref:
+            return None
+        candidate = project_dir / f"{prjs[0].stem}.{ref}"
+        if candidate.exists():
+            return candidate
+        candidate = project_dir / ref
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _is_plan_result_hdf(path: Path) -> bool:

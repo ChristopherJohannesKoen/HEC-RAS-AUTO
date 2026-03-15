@@ -16,15 +16,35 @@ def build_ai_word_report(
     ai_config: AIAgentConfig,
     output_root: Path = Path("outputs"),
 ) -> dict[str, str]:
+    context = _collect_context(run_id=run_id, prompt_text=prompt_text, output_root=output_root)
+    return build_ai_word_report_from_context(
+        report_id=run_id,
+        context=context,
+        ai_config=ai_config,
+        output_root=output_root,
+    )
+
+
+def build_ai_word_report_from_context(
+    report_id: str,
+    context: dict[str, str],
+    ai_config: AIAgentConfig,
+    output_root: Path,
+    require_ai: bool = False,
+) -> dict[str, str]:
     reports_dir = output_root / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
-    md_path = reports_dir / f"{run_id}_final_ai_report.md"
-    docx_path = reports_dir / f"{run_id}_final_ai_report.docx"
-    debug_path = reports_dir / f"{run_id}_final_ai_report_debug.json"
+    md_path = reports_dir / f"{report_id}_final_ai_report.md"
+    docx_path = reports_dir / f"{report_id}_final_ai_report.docx"
+    debug_path = reports_dir / f"{report_id}_final_ai_report_debug.json"
 
-    context = _collect_context(run_id=run_id, prompt_text=prompt_text, output_root=output_root)
     ai_result = _generate_sections_with_ai(context=context, ai_config=ai_config)
-    title = ai_result.get("title") or f"{run_id} Hydraulic Report"
+    if require_ai and not ai_result.get("ai_enabled", False):
+        reason = str(ai_result.get("error", "")).strip()
+        if not reason:
+            reason = "OpenAI report generation is required but no AI response was produced."
+        raise RuntimeError(reason)
+    title = ai_result.get("title") or f"{report_id} Hydraulic Report"
     sections = ai_result.get("sections") or _fallback_sections_from_context(context)
     if not isinstance(sections, list) or not sections:
         sections = _fallback_sections_from_context(context)
@@ -34,11 +54,12 @@ def build_ai_word_report(
     written_docx_path = _write_docx(title=title, sections=sections, out_path=docx_path)
 
     debug_payload = {
-        "run_id": run_id,
+        "run_id": report_id,
         "title": title,
         "section_count": len(sections),
         "ai_enabled": bool(ai_result.get("ai_enabled", False)),
         "response_id": ai_result.get("response_id"),
+        "ai_error": ai_result.get("error"),
         "docx_path": str(written_docx_path),
         "docx_fallback_used": str(written_docx_path) != str(docx_path),
     }
@@ -69,16 +90,24 @@ def _collect_context(run_id: str, prompt_text: str, output_root: Path) -> dict[s
 
 
 def _generate_sections_with_ai(context: dict[str, str], ai_config: AIAgentConfig) -> dict:
-    enabled = bool(os.getenv(ai_config.api_key_env))
-    if not enabled:
-        return {"ai_enabled": False, "sections": _fallback_sections_from_context(context)}
+    api_key = str(os.getenv(ai_config.api_key_env, "")).strip()
+    if not api_key:
+        return {
+            "ai_enabled": False,
+            "error": f"Environment variable {ai_config.api_key_env} is missing or empty.",
+            "sections": _fallback_sections_from_context(context),
+        }
 
     try:
         from openai import OpenAI
 
-        client = OpenAI(api_key=os.getenv(ai_config.api_key_env))
-    except Exception:
-        return {"ai_enabled": False, "sections": _fallback_sections_from_context(context)}
+        client = OpenAI(api_key=api_key)
+    except Exception as exc:
+        return {
+            "ai_enabled": False,
+            "error": f"OpenAI client initialization failed: {exc}",
+            "sections": _fallback_sections_from_context(context),
+        }
 
     system_prompt = (
         ai_config.prompts.report.full_report
@@ -105,15 +134,25 @@ def _generate_sections_with_ai(context: dict[str, str], ai_config: AIAgentConfig
         "context": context,
     }
     try:
-        resp = client.responses.create(
-            model=ai_config.model,
-            temperature=min(ai_config.temperature, 0.2),
-            max_output_tokens=max(ai_config.max_tokens, 2500),
-            input=[
+        request_kwargs = {
+            "model": ai_config.model,
+            "max_output_tokens": max(ai_config.max_tokens, 2500),
+            "input": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(request)},
             ],
-        )
+        }
+        temp_value = min(ai_config.temperature, 0.2)
+        model_name = str(ai_config.model).strip().lower()
+        if temp_value is not None and not model_name.startswith("gpt-5"):
+            request_kwargs["temperature"] = temp_value
+        try:
+            resp = client.responses.create(**request_kwargs)
+        except Exception as exc:
+            if "temperature" not in str(exc).lower():
+                raise
+            request_kwargs.pop("temperature", None)
+            resp = client.responses.create(**request_kwargs)
         raw = getattr(resp, "output_text", "") or ""
         response_id = getattr(resp, "id", None)
         obj = _extract_json(raw)
@@ -121,13 +160,18 @@ def _generate_sections_with_ai(context: dict[str, str], ai_config: AIAgentConfig
             return {
                 "ai_enabled": True,
                 "response_id": response_id,
+                "error": "OpenAI returned non-JSON output; using deterministic fallback sections.",
                 "sections": _fallback_sections_from_context(context),
             }
         obj["ai_enabled"] = True
         obj["response_id"] = response_id
         return obj
-    except Exception:
-        return {"ai_enabled": False, "sections": _fallback_sections_from_context(context)}
+    except Exception as exc:
+        return {
+            "ai_enabled": False,
+            "error": f"OpenAI response generation failed: {exc}",
+            "sections": _fallback_sections_from_context(context),
+        }
 
 
 def _sections_to_markdown(title: str, sections: list[dict]) -> str:

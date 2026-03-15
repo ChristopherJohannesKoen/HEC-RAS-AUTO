@@ -12,6 +12,7 @@ def compute_metrics(
     run_id: str,
     floodline_geojson: Path | None = None,
     output_root: Path = Path("outputs"),
+    confluence_chainage_m: float | None = 1500.0,
 ) -> Path:
     out_dir = output_root / run_id / "tables"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -38,8 +39,12 @@ def compute_metrics(
                 "max_velocity_chainage_m": float(df.loc[max_vel_idx, "chainage_m"]),
                 "flood_extent_area_m2": flood_extent_area_m2,
                 "flood_extent_area_ha": flood_extent_area_ha,
-                "confluence_chainage_m": 1500.0,
-                "confluence_note": "[VERIFY] Interpret local hydraulic effect using HEC-RAS profile and velocity maps.",
+                "confluence_chainage_m": float(confluence_chainage_m) if confluence_chainage_m is not None else float("nan"),
+                "confluence_note": (
+                    "[VERIFY] Interpret local hydraulic effect using HEC-RAS profile and velocity maps."
+                    if confluence_chainage_m is not None
+                    else "[VERIFY] No confluence metadata was inferred for this project."
+                ),
                 "flood_extent_note": (
                     "[VERIFY] Flood extent envelope missing or non-polygon geometry."
                     if np.isnan(flood_extent_area_m2)

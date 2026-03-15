@@ -3,6 +3,7 @@
 Deterministic + agent-assisted automation for the Meerlustkloof 1D steady HEC-RAS workflow:
 - baseline model build/compute/report
 - Scenario 2 climate-intensification triad (`lenient`, `average`, `conservative`)
+- read-only batch analysis of existing HEC-RAS project folders under `analyse/`
 - optional OpenAI-assisted narrative report generation
 
 ## Requirements
@@ -28,6 +29,7 @@ Versioned example output snapshot:
 
 Generated runtime folders (ignored by git):
 - `outputs/`, `runs/`, `logs/`, `data/processed/*`
+- `analyse/` can contain standalone HEC-RAS project folders for read-only audit/report generation
 
 ## Setup
 
@@ -81,11 +83,48 @@ ras-auto build-report --run-id prompt_live_run_scenario_2_conservative --ai conf
 Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
 ```
 
+## Read-Only Batch Analysis of Existing Project Folders
+
+Drop one or more standalone HEC-RAS project folders directly under `analyse/`, then run:
+
+```powershell
+$env:OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
+
+ras-auto analyze-projects `
+  --source analyse `
+  --output-root outputs/analyse `
+  --ai config/ai.yml `
+  --compute-missing-results `
+  --force-temp-compute `
+  --strict:$false
+
+Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
+```
+
+Behavior:
+- each direct child folder under `analyse/` is treated as a separate project
+- source folders are read-only inputs and are never modified
+- if a project lacks usable result files, the tool may compute a temporary clone under `runs/analyse_<project_name>/ras_project`
+- if `--force-temp-compute` is set, every steady project is cloned and recomputed in temp even when source results already exist
+- final AI Word reports are required for this workflow, so `OPENAI_API_KEY` must be set
+
+Outputs:
+- `outputs/analyse/<project_name>/inventory/`
+- `outputs/analyse/<project_name>/artifacts/`
+- `outputs/analyse/<project_name>/sections/`
+- `outputs/analyse/<project_name>/tables/`
+- `outputs/analyse/<project_name>/plots/`
+- `outputs/analyse/<project_name>/qa/`
+- `outputs/analyse/<project_name>/reports/`
+- `outputs/analyse/batch_manifest.json`
+- `outputs/analyse/index.md`
+
 ## Output Conventions
 
 Live generated outputs:
 - `outputs/<run_id>/...`
 - `outputs/reports/...`
+- `outputs/analyse/<project_name>/...` for read-only audits of existing HEC-RAS project folders
 
 Scenario 2 triad outputs:
 - `outputs/prompt_live_run_scenario_2_lenient/`
@@ -105,6 +144,7 @@ Committed sample output preview:
 - If `agent-run` fails because files are locked in `runs/<run_id>/ras_project`, close HEC-RAS and retry:
   - `ras-auto agent-resume --run-id <run_id> --strict`
 - If AI reports are skipped, confirm `OPENAI_API_KEY` is set in the current shell.
+- If `analyze-projects` reports a project as partial, inspect `outputs/analyse/<project_name>/inventory/analysis_notes.json` and `qa/project_analysis.md`.
 - If `Ras.exe` is not detected, set `HEC_RAS_EXE` or update `config/project.yml`.
 
 ## Security

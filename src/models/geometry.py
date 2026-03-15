@@ -20,7 +20,7 @@ class ReferencePoint(BaseModel):
 class SectionPoint(BaseModel):
     station: float
     elevation: float
-    source: Literal["excel", "terrain_fill", "interpolated", "manual_override"] = "excel"
+    source: Literal["excel", "terrain_fill", "interpolated", "manual_override", "hec_ras_project"] = "excel"
 
 
 class CrossSection(BaseModel):

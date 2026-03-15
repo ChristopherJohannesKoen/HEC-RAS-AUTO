@@ -98,6 +98,19 @@ def extract_profile_values(
     station_map_csv: Path,
     out_csv: Path,
 ) -> Path:
+    station_map = _load_station_map_csv(station_map_csv)
+    return extract_profile_values_with_station_map(
+        hdf_path=hdf_path,
+        station_map=station_map,
+        out_csv=out_csv,
+    )
+
+
+def extract_profile_values_with_station_map(
+    hdf_path: Path,
+    station_map: pd.DataFrame,
+    out_csv: Path,
+) -> Path:
     """
     Attempt to extract 1D profile vectors (WSE/EG/Velocity) and map them to chainage.
     Heuristic path matching is used because HEC-RAS HDF group names vary by version.
@@ -123,8 +136,8 @@ def extract_profile_values(
     eg_vals = _align_to_len(eg[1], target_len) if eg else np.full(target_len, np.nan)
     vel_vals = _align_to_len(vel[1], target_len) if vel else np.full(target_len, np.nan)
 
-    station_vals = _build_station_vector(sta[1] if sta else None, target_len, station_map_csv)
-    chainage_vals = _map_station_to_chainage(station_vals, station_map_csv)
+    station_vals = _build_station_vector(sta[1] if sta else None, target_len, station_map)
+    chainage_vals = _map_station_to_chainage(station_vals, station_map)
 
     df = pd.DataFrame(
         {
@@ -222,15 +235,23 @@ def _align_to_len(values: np.ndarray, length: int) -> np.ndarray:
     return np.interp(dst_x, src_x, values.astype(float))
 
 
-def _build_station_vector(stations: np.ndarray | None, length: int, station_map_csv: Path) -> np.ndarray:
+def _load_station_map_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=["chainage_m", "river_station"])
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame(columns=["chainage_m", "river_station"])
+
+
+def _build_station_vector(stations: np.ndarray | None, length: int, station_map: pd.DataFrame) -> np.ndarray:
     if stations is not None:
         return _align_to_len(stations.astype(float), length)
 
-    if station_map_csv.exists():
+    if not station_map.empty:
         try:
-            xs = pd.read_csv(station_map_csv)
             ref = (
-                xs[["chainage_m", "river_station"]]
+                station_map[["chainage_m", "river_station"]]
                 .drop_duplicates()
                 .sort_values("chainage_m")
                 .reset_index(drop=True)
@@ -242,13 +263,12 @@ def _build_station_vector(stations: np.ndarray | None, length: int, station_map_
     return np.linspace(0.0, float(length - 1), length)
 
 
-def _map_station_to_chainage(stations: np.ndarray, station_map_csv: Path) -> np.ndarray:
-    if not station_map_csv.exists():
+def _map_station_to_chainage(stations: np.ndarray, station_map: pd.DataFrame) -> np.ndarray:
+    if station_map.empty:
         return stations
     try:
-        xs = pd.read_csv(station_map_csv)
         ref = (
-            xs[["chainage_m", "river_station"]]
+            station_map[["chainage_m", "river_station"]]
             .drop_duplicates()
             .dropna()
             .sort_values("river_station")

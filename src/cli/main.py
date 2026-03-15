@@ -9,6 +9,7 @@ from pathlib import Path
 import typer
 from typer.models import OptionInfo
 
+from src.analyse.batch_analysis import analyze_project_folders
 from src.common.config import (
     load_ai_config,
     load_agent_config,
@@ -344,6 +345,30 @@ def analyze(
     typer.echo(f"CAD DXF: {dxf}")
     typer.echo(f"Hydraulic QA: {hyd_path}")
     typer.echo(f"Regime memo: {regime_path}")
+
+
+@app.command("analyze-projects")
+def analyze_projects(
+    source: Path = typer.Option(Path("analyse")),
+    output_root: Path = typer.Option(Path("outputs/analyse")),
+    ai: Path = typer.Option(Path("config/ai.yml")),
+    compute_missing_results: bool = typer.Option(True),
+    force_temp_compute: bool = typer.Option(False, help="Clone and recompute every steady project in temp, even if results already exist."),
+    strict: bool = typer.Option(False),
+) -> None:
+    """Read-only batch analysis of standalone HEC-RAS project folders under a source directory."""
+    configure_logging()
+    ai_cfg = load_ai_config(ai).ai
+    manifest = analyze_project_folders(
+        source_root=source,
+        output_root=output_root,
+        ai_config=ai_cfg,
+        strict=strict,
+        compute_missing_results=compute_missing_results,
+        force_temp_compute=force_temp_compute,
+    )
+    typer.echo(f"Batch manifest: {manifest}")
+    typer.echo(f"Batch index: {output_root / 'index.md'}")
 
 
 @app.command("apply-scenario")

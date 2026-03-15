@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import pandas as pd
-
 
 REQUIRED_CHAINGAGES = [0.0, 1500.0, 3905.0]
 
@@ -50,6 +53,42 @@ def extract_required_sections(
     return out_table
 
 
+def extract_all_sections(
+    cross_sections_csv: Path,
+    run_id: str,
+    profile_values_csv: Path | None = None,
+    signal_summary_csv: Path | None = None,
+    output_root: Path = Path("outputs"),
+) -> Path:
+    out_dir = output_root / run_id / "sections"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    df = pd.read_csv(cross_sections_csv)
+    out_table = out_dir / "all_sections.csv"
+
+    if df.empty:
+        pd.DataFrame().to_csv(out_table, index=False)
+        return out_table
+
+    profile_values = _load_profile_values(profile_values_csv) if profile_values_csv else {}
+    signal_values = _load_signal_values(signal_summary_csv) if signal_summary_csv else {}
+    rows = []
+    for chainage, group in df.groupby("chainage_m", dropna=False):
+        sec = group.sort_values("offset_m").copy()
+        bed_min = float(sec["elevation_m"].min())
+        values = _select_hydraulic_values(float(chainage), bed_min, profile_values, signal_values)
+        sec["water_level_m"] = values["water"]
+        sec["energy_level_m"] = values["energy"]
+        sec["velocity_mps"] = values["velocity"]
+        sec["requested_chainage_m"] = float(chainage)
+        sec["hydraulic_source"] = values["source"]
+        rows.append(sec)
+        png_name = f"section_chainage_{_safe_section_suffix(chainage)}.png"
+        _plot_section(sec, out_dir / png_name)
+
+    pd.concat(rows, ignore_index=True).to_csv(out_table, index=False)
+    return out_table
+
+
 def _nearest_chainage_section(df: pd.DataFrame, target: float) -> pd.DataFrame:
     if df.empty:
         return df
@@ -70,6 +109,11 @@ def _plot_section(sec: pd.DataFrame, out_png: Path) -> None:
     fig.tight_layout()
     fig.savefig(out_png, dpi=150)
     plt.close(fig)
+
+
+def _safe_section_suffix(chainage: float) -> str:
+    text = f"{float(chainage):.3f}".rstrip("0").rstrip(".")
+    return text.replace("-", "neg_").replace(".", "_")
 
 
 def _load_signal_values(path: Path | None) -> dict[str, float]:

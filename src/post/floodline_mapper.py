@@ -18,6 +18,8 @@ def export_energy_floodline(
     target_epsg: int,
     profile_values_csv: Path | None = None,
     output_root: Path = Path("outputs"),
+    sections_json: Path | None = None,
+    allow_scalar_fallback: bool = True,
 ) -> Path:
     out_dir = output_root / run_id / "gis"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -25,14 +27,14 @@ def export_energy_floodline(
     if df.empty:
         raise ValueError("Sections CSV empty; cannot derive floodline.")
 
-    sections_json = Path("data/processed/cross_sections_final.json")
+    sections_json = sections_json or Path("data/processed/cross_sections_final.json")
     features = _build_energy_flood_features(
         sampled_sections=df,
         sections_json=sections_json,
         run_id=run_id,
         profile_values_csv=profile_values_csv,
     )
-    if not features:
+    if not features and allow_scalar_fallback:
         # Final fallback: keep deterministic artifact creation even if geometry
         # inputs are incomplete.
         points = list(zip(df["offset_m"], df["energy_level_m"]))
