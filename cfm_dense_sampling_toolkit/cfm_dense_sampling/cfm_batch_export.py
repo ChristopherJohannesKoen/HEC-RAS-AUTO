@@ -57,13 +57,23 @@ def load_line_ids(transects_path: Path) -> List[str]:
 
 def click_if_visible(page: Page, texts: Iterable[str], timeout_ms: int = 2000) -> bool:
     for txt in texts:
-        locator = page.get_by_text(txt, exact=True)
-        try:
-            locator.first.wait_for(timeout=timeout_ms)
-            locator.first.click()
-            return True
-        except Exception:
-            pass
+        for locator in [
+            page.get_by_role("button", name=txt),
+            page.get_by_text(txt, exact=True),
+        ]:
+            try:
+                count = locator.count()
+            except Exception:
+                count = 0
+            for i in range(count):
+                item = locator.nth(i)
+                try:
+                    item.wait_for(timeout=timeout_ms)
+                    if item.is_visible():
+                        item.click()
+                        return True
+                except Exception:
+                    continue
     return False
 
 
@@ -78,7 +88,8 @@ def maybe_dismiss_startup_modals(page: Page) -> None:
 
 
 def open_user_data_import(page: Page) -> None:
-    page.get_by_text("User Data", exact=True).click(timeout=15000)
+    if not click_if_visible(page, ["User Data"], timeout_ms=15000):
+        raise RuntimeError("Could not open the 'User Data' panel.")
     # The file input is usually already visible once User Data is open.
     page.wait_for_timeout(1000)
 
@@ -94,8 +105,10 @@ def import_transects(page: Page, transects_path: Path) -> None:
 
 
 def open_graphics_table(page: Page) -> None:
-    page.get_by_text("Graphics", exact=True).click(timeout=10000)
-    page.get_by_text("Attribute Table", exact=True).click(timeout=10000)
+    if not click_if_visible(page, ["Graphics"], timeout_ms=10000):
+        raise RuntimeError("Could not open the 'Graphics' panel.")
+    if not click_if_visible(page, ["Attribute Table"], timeout_ms=10000):
+        raise RuntimeError("Could not open the graphics attribute table.")
     page.wait_for_timeout(1500)
 
 
@@ -130,15 +143,30 @@ def select_row_by_text(page: Page, line_id: str) -> bool:
 
 
 def select_row_by_index(page: Page, row_index: int) -> bool:
-    rows = attribute_rows(page)
+    tables = page.locator("table")
+    visible_table = None
+    try:
+        table_count = tables.count()
+    except Exception:
+        table_count = 0
+    for i in range(table_count):
+        candidate = tables.nth(i)
+        try:
+            if candidate.is_visible():
+                visible_table = candidate
+                break
+        except Exception:
+            continue
+    if visible_table is None:
+        return False
+    rows = visible_table.locator("tbody tr")
     try:
         count = rows.count()
     except Exception:
         count = 0
     if count == 0:
         return False
-    # Skip the first row if it looks like a header.
-    idx = min(row_index + 1, count - 1)
+    idx = min(max(row_index, 0), count - 1)
     try:
         rows.nth(idx).click(timeout=3000)
         page.wait_for_timeout(500)
@@ -152,14 +180,31 @@ def open_feature_actions_if_needed(page: Page) -> None:
     # If not, try the action section/tab.
     if page.get_by_text("Elevation Profile", exact=True).count() > 0:
         return
-    click_if_visible(page, ["Action 1", "Feature Actions"], timeout_ms=1000)
+    action_tab = page.locator('calcite-tab-title[aria-controls="sketch-feature-actions"]').first
+    try:
+        action_tab.click(timeout=3000)
+    except Exception:
+        click_if_visible(page, ["Action 1", "Feature Actions"], timeout_ms=1000)
     page.wait_for_timeout(300)
 
 
 def run_elevation_profile(page: Page) -> None:
     open_feature_actions_if_needed(page)
-    page.get_by_text("Elevation Profile", exact=True).first.click(timeout=8000)
-    page.get_by_text("Profile Statistics", exact=True).first.wait_for(timeout=30000)
+    try:
+        action_tab = page.locator('calcite-tab-title[aria-controls="sketch-feature-actions"]').first
+        try:
+            action_tab.click(timeout=3000)
+            page.wait_for_timeout(300)
+        except Exception:
+            pass
+        page.locator("#sketch-elevprof").evaluate("(el) => el.click()")
+    except Exception:
+        page.get_by_text("Elevation Profile", exact=True).first.click(timeout=8000)
+    try:
+        page.locator("#modal-elevprofile").wait_for(timeout=30000)
+        page.locator("#elevprofile-csv").wait_for(timeout=30000)
+    except Exception:
+        page.get_by_text("Profile Statistics", exact=True).first.wait_for(timeout=30000)
     page.wait_for_timeout(1000)
 
 
@@ -181,17 +226,37 @@ def visible_export_buttons(page: Page) -> List[Locator]:
 
 
 def export_current_profile_csv(page: Page, save_path: Path) -> None:
-    buttons = visible_export_buttons(page)
-    if not buttons:
-        raise RuntimeError("Could not find a visible 'Export to CSV' button.")
-    # The profile panel export is typically the last visible CSV export button.
-    export_button = buttons[-1]
+    export_button = page.locator("#elevprofile-csv").first
+    try:
+        export_button.wait_for(timeout=15000)
+    except Exception:
+        buttons = visible_export_buttons(page)
+        if not buttons:
+            raise RuntimeError("Could not find a visible 'Export to CSV' button.")
+        export_button = buttons[-1]
     with page.expect_download(timeout=30000) as dl:
-        export_button.click()
+        try:
+            export_button.evaluate("(el) => el.click()")
+        except Exception:
+            export_button.click()
     download = dl.value
     save_path.parent.mkdir(parents=True, exist_ok=True)
     download.save_as(str(save_path))
     page.wait_for_timeout(500)
+
+
+def close_current_profile(page: Page) -> None:
+    modal = page.locator("#modal-elevprofile").first
+    try:
+        modal.evaluate(
+            """(el) => {
+                el.open = false;
+                el.removeAttribute('open');
+            }"""
+        )
+    except Exception:
+        pass
+    page.wait_for_timeout(300)
 
 
 def main() -> None:
@@ -229,13 +294,15 @@ def main() -> None:
             absolute_idx = start + offset
             csv_path = args.downloads / f"{line_id}.csv"
             try:
+                open_graphics_table(page)
                 ok = select_row_by_text(page, line_id)
                 if not ok:
-                    ok = select_row_by_index(page, absolute_idx)
+                    ok = select_row_by_index(page, offset)
                 if not ok:
                     raise RuntimeError(f"Could not select row for {line_id}")
                 run_elevation_profile(page)
                 export_current_profile_csv(page, csv_path)
+                close_current_profile(page)
                 print(f"OK {line_id} -> {csv_path}")
             except Exception as exc:
                 failures.append({"line_id": line_id, "error": str(exc)})
