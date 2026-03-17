@@ -13,6 +13,11 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from shapely.geometry import Point
 
+try:
+    import contextily as ctx
+except Exception:
+    ctx = None
+
 
 def _detect_column(columns: list[str], candidates: list[str]) -> str:
     lowered = {c.lower(): c for c in columns}
@@ -35,6 +40,14 @@ def _load_profile_points(transects: gpd.GeoDataFrame, profiles_dir: Path) -> gpd
             continue
         distance_col = _detect_column(list(df.columns), ["distance", "chainage", "station"])
         elevation_col = _detect_column(list(df.columns), ["elevation", "height", "z"])
+        lon_col = None
+        lat_col = None
+        try:
+            lon_col = _detect_column(list(df.columns), ["lon", "longitude"])
+            lat_col = _detect_column(list(df.columns), ["lat", "latitude"])
+        except Exception:
+            lon_col = None
+            lat_col = None
         line = transects.loc[line_id, "geometry"]
         line_length = float(line.length)
         for idx, record in df.iterrows():
@@ -45,7 +58,13 @@ def _load_profile_points(transects: gpd.GeoDataFrame, profiles_dir: Path) -> gpd
                 continue
             if distance < 0:
                 continue
-            point = line.interpolate(min(distance, line_length))
+            if lon_col and lat_col:
+                try:
+                    point = Point(float(record[lon_col]), float(record[lat_col]))
+                except Exception:
+                    point = line.interpolate(min(distance, line_length))
+            else:
+                point = line.interpolate(min(distance, line_length))
             rows.append(
                 {
                     "line_id": line_id,
@@ -91,22 +110,34 @@ def main() -> None:
     profiled_transects.to_file(profiled_transects_path, driver="GeoJSON")
 
     fig, ax = plt.subplots(figsize=(10, 10))
-    boundary.boundary.plot(ax=ax, color="black", linewidth=1.2)
-    transects.plot(ax=ax, color="#b9d2e6", linewidth=0.6, alpha=0.45)
-    if not profiled_transects.empty:
-        profiled_transects.plot(ax=ax, color="#356d9a", linewidth=1.8, alpha=0.95)
-    points.plot(
+    plot_boundary = boundary
+    plot_transects = transects
+    plot_profiled = profiled_transects
+    plot_points = points
+    use_basemap = ctx is not None
+    if use_basemap:
+        plot_boundary = boundary.to_crs(epsg=3857)
+        plot_transects = transects.to_crs(epsg=3857)
+        plot_profiled = profiled_transects.to_crs(epsg=3857)
+        plot_points = points.to_crs(epsg=3857)
+    plot_boundary.boundary.plot(ax=ax, color="black", linewidth=1.2)
+    plot_transects.plot(ax=ax, color="#b9d2e6", linewidth=0.6, alpha=0.45)
+    if not plot_profiled.empty:
+        plot_profiled.plot(ax=ax, color="#356d9a", linewidth=1.8, alpha=0.95)
+    plot_points.plot(
         ax=ax,
         column="elevation_m",
         cmap="terrain",
-        markersize=18,
-        alpha=0.9,
+        markersize=20,
+        alpha=0.95,
         legend=True,
         legend_kwds={"label": "CFM Elevation (m)"},
     )
+    if use_basemap:
+        ctx.add_basemap(ax, source=ctx.providers.Esri.WorldImagery, attribution=False, reset_extent=False)
     ax.set_title("Cape Farm Mapper Dense Sampling")
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
+    ax.set_xlabel("Easting" if use_basemap else "Longitude")
+    ax.set_ylabel("Northing" if use_basemap else "Latitude")
     ax.grid(alpha=0.2)
     fig.tight_layout()
     fig.savefig(map_path, dpi=200)
