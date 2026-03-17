@@ -11,6 +11,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
+from pyproj import CRS
+from shapely.geometry import LineString
 from shapely.geometry import Point
 
 try:
@@ -28,13 +30,81 @@ def _detect_column(columns: list[str], candidates: list[str]) -> str:
     raise ValueError(f"Could not detect required column from {columns}")
 
 
-def _load_profile_points(transects: gpd.GeoDataFrame, profiles_dir: Path) -> gpd.GeoDataFrame:
+def _utm_epsg_for_lon_lat(lon: float, lat: float) -> int:
+    zone = int((lon + 180) / 6) + 1
+    return (32700 if lat < 0 else 32600) + zone
+
+
+def _metric_crs_for_gdf(gdf: gpd.GeoDataFrame) -> CRS:
+    geom = gdf.to_crs(epsg=4326).geometry
+    union = geom.union_all() if hasattr(geom, "union_all") else geom.unary_union
+    centroid = union.centroid
+    return CRS.from_epsg(_utm_epsg_for_lon_lat(centroid.x, centroid.y))
+
+
+def _resolve_profile_matches(transects: gpd.GeoDataFrame, profiles_dir: Path) -> list[dict]:
+    metric_crs = _metric_crs_for_gdf(transects)
+    transects_metric = transects.to_crs(metric_crs).set_index("line_id", drop=False)
+    available_ids = set(transects_metric.index.astype(str))
+    matches: list[dict] = []
+
+    for csv_path in sorted(profiles_dir.glob("*.csv")):
+        df = pd.read_csv(csv_path)
+        if df.empty:
+            continue
+        lon_col = _detect_column(list(df.columns), ["lon", "longitude"])
+        lat_col = _detect_column(list(df.columns), ["lat", "latitude"])
+        distance_col = _detect_column(list(df.columns), ["distance", "chainage", "station"])
+        line_points = [Point(float(r[lon_col]), float(r[lat_col])) for _, r in df.iterrows()]
+        if len(line_points) < 2:
+            continue
+        profile_line = LineString(line_points)
+        profile_line_metric = gpd.GeoSeries([profile_line], crs=transects.crs).to_crs(metric_crs).iloc[0]
+        file_id = csv_path.stem
+
+        candidate_ids = list(available_ids) or list(transects_metric.index.astype(str))
+        if file_id in candidate_ids:
+            candidate_ids = [file_id] + [cid for cid in candidate_ids if cid != file_id]
+
+        best_id = None
+        best_score = float("inf")
+        best_length = None
+        for candidate_id in candidate_ids:
+            geom = transects_metric.loc[candidate_id, "geometry"]
+            score = geom.hausdorff_distance(profile_line_metric)
+            if score < best_score:
+                best_id = candidate_id
+                best_score = float(score)
+                best_length = float(transects_metric.loc[candidate_id, "length_m"])
+        if best_id is None:
+            continue
+        if best_id in available_ids:
+            available_ids.remove(best_id)
+        matches.append(
+            {
+                "source_csv": csv_path.name,
+                "source_stem": file_id,
+                "matched_line_id": str(best_id),
+                "match_hausdorff_m": best_score,
+                "csv_length_m": float(df.iloc[-1][distance_col]),
+                "transect_length_m": best_length,
+                "length_diff_m": float(df.iloc[-1][distance_col]) - float(best_length),
+            }
+        )
+    return matches
+
+
+def _load_profile_points(
+    transects: gpd.GeoDataFrame, profiles_dir: Path, matches: list[dict]
+) -> gpd.GeoDataFrame:
     rows: list[dict] = []
     transects = transects.set_index("line_id", drop=False)
+    match_map = {m["source_csv"]: m for m in matches}
     for csv_path in sorted(profiles_dir.glob("*.csv")):
-        line_id = csv_path.stem
-        if line_id not in transects.index:
+        match = match_map.get(csv_path.name)
+        if not match:
             continue
+        line_id = match["matched_line_id"]
         df = pd.read_csv(csv_path)
         if df.empty:
             continue
@@ -93,7 +163,8 @@ def main() -> None:
     if "line_id" not in transects.columns:
         raise SystemExit("Transects file must contain a 'line_id' property.")
 
-    points = _load_profile_points(transects, args.profiles_dir)
+    matches = _resolve_profile_matches(transects, args.profiles_dir)
+    points = _load_profile_points(transects, args.profiles_dir, matches)
     profiled_line_ids = set(points["line_id"].astype(str))
     profiled_transects = transects[transects["line_id"].astype(str).isin(profiled_line_ids)].copy()
 
@@ -102,12 +173,14 @@ def main() -> None:
     points_path = out_dir / "cfm_profile_points.geojson"
     transects_path = out_dir / "cfm_transects.geojson"
     profiled_transects_path = out_dir / "cfm_profiled_transects.geojson"
+    match_manifest_path = out_dir / "cfm_profile_match_manifest.csv"
     map_path = out_dir / "cfm_profile_map.png"
     summary_path = out_dir / "cfm_profile_summary.json"
 
     points.to_file(points_path, driver="GeoJSON")
     transects.to_file(transects_path, driver="GeoJSON")
     profiled_transects.to_file(profiled_transects_path, driver="GeoJSON")
+    pd.DataFrame(matches).to_csv(match_manifest_path, index=False)
 
     fig, ax = plt.subplots(figsize=(10, 10))
     plot_boundary = boundary
@@ -151,6 +224,9 @@ def main() -> None:
         "points_geojson": str(points_path),
         "transects_geojson": str(transects_path),
         "profiled_transects_geojson": str(profiled_transects_path),
+        "profile_match_manifest_csv": str(match_manifest_path),
+        "match_hausdorff_m_max": float(pd.DataFrame(matches)["match_hausdorff_m"].max()) if matches else None,
+        "match_hausdorff_m_mean": float(pd.DataFrame(matches)["match_hausdorff_m"].mean()) if matches else None,
         "map_png": str(map_path),
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
