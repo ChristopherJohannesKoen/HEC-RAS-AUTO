@@ -20,6 +20,7 @@ Runtime source:
 - `config/` run/automation/report configuration
 - `shell/ras_project/` HEC-RAS shell project template
 - `scripts/` runnable helper scripts
+- `cfm_dense_sampling_toolkit/` Cape Farm Mapper dense-sampling utilities
 - `prompts/` prompt files used by example scripts
 - `ref/` input package used by `--source ref`
 - `data/raw/meerlustkloof/` runtime intake destination (auto-populated from `ref`)
@@ -30,6 +31,35 @@ Versioned example output snapshot:
 Generated runtime folders (ignored by git):
 - `outputs/`, `runs/`, `logs/`, `data/processed/*`
 - `analyse/` can contain standalone HEC-RAS project folders for read-only audit/report generation
+
+## Optional CFM Dense Sampling Toolkit
+
+Use `cfm_dense_sampling_toolkit/` when you want dense terrain/elevation-profile sampling from Cape Farm Mapper outside the main HEC-RAS automation flow.
+
+What it does:
+- builds a geographic boundary from KMZ anchors or a supplied polygon
+- generates parallel transects at a chosen spacing
+- automates Cape Farm Mapper profile export with Playwright
+- merges the exported CSV files
+- matches exported profiles back to the correct transects geometrically
+- renders a map from the exported CFM data
+
+Toolkit scripts:
+- `cfm_dense_sampling_toolkit/cfm_dense_sampling/build_kmz_corridor_boundary.py`
+- `cfm_dense_sampling_toolkit/cfm_dense_sampling/generate_transects.py`
+- `cfm_dense_sampling_toolkit/cfm_dense_sampling/cfm_batch_export.py`
+- `cfm_dense_sampling_toolkit/cfm_dense_sampling/merge_profile_csvs.py`
+- `cfm_dense_sampling_toolkit/cfm_dense_sampling/map_cfm_profiles.py`
+
+Toolkit-specific dependencies:
+
+```powershell
+py -3.11 -m pip install requests playwright contextily
+py -3.11 -m playwright install chromium
+```
+
+See:
+- `cfm_dense_sampling_toolkit/README.md`
 
 ## Setup
 
@@ -96,7 +126,7 @@ ras-auto analyze-projects `
   --ai config/ai.yml `
   --compute-missing-results `
   --force-temp-compute `
-  --strict:$false
+  --no-strict
 
 Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
 ```
@@ -125,6 +155,7 @@ Live generated outputs:
 - `outputs/<run_id>/...`
 - `outputs/reports/...`
 - `outputs/analyse/<project_name>/...` for read-only audits of existing HEC-RAS project folders
+- `outputs/cfm_dense_sampling*/...` for Cape Farm Mapper dense-sampling runs
 
 Scenario 2 triad outputs:
 - `outputs/prompt_live_run_scenario_2_lenient/`
@@ -138,6 +169,12 @@ Submission manifest:
 
 Committed sample output preview:
 - `examples/prompt_live_run/`
+
+CFM dense sampling example outputs:
+- `outputs/cfm_dense_sampling/` for the initial debug-scale run
+- `outputs/cfm_dense_sampling_bounds20/` for the full 20 m spacing run built from user-supplied geographic bounds
+- `outputs/cfm_dense_sampling_bounds20/map/cfm_profile_map.png`
+- `outputs/cfm_dense_sampling_bounds20/map/cfm_profile_match_manifest.csv`
 
 ## Troubleshooting
 
