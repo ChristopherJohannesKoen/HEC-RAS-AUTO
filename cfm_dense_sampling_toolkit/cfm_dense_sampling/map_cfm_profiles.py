@@ -194,9 +194,9 @@ def main() -> None:
         plot_profiled = profiled_transects.to_crs(epsg=3857)
         plot_points = points.to_crs(epsg=3857)
     plot_boundary.boundary.plot(ax=ax, color="black", linewidth=1.2)
-    plot_transects.plot(ax=ax, color="#b9d2e6", linewidth=0.6, alpha=0.45)
+    plot_transects.plot(ax=ax, color="#b9d2e6", linewidth=0.6, alpha=0.1)
     if not plot_profiled.empty:
-        plot_profiled.plot(ax=ax, color="#356d9a", linewidth=1.8, alpha=0.95)
+        plot_profiled.plot(ax=ax, color="#356d9a", linewidth=1.8, alpha=0.1)
     plot_points.plot(
         ax=ax,
         column="elevation_m",
